@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "studio-backend"
+version = "0.0.1"
+description = "FastAPI backend for the metaDSL interactive studio"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "numpy>=1.24",
+    "pydantic>=2.0",
+    "anthropic>=0.40",
+]
+
+[tool.setuptools.packages.find]
+include = ["studio_backend*"]

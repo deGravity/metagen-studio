@@ -1,0 +1,10 @@
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+backend/*.egg-info/
+backend/build/
+backend/__pycache__/
+**/__pycache__/
+**/*.pyc
+.DS_Store
