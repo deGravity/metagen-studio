@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "studio-backend"
-version = "0.0.1"
-description = "FastAPI backend for the metaDSL interactive studio"
+name = "metagen-studio"
+version = "0.1.0"
+description = "Browser-based interactive CAD studio + AI copilot for metaDSL programs."
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",
@@ -13,7 +13,21 @@ dependencies = [
     "numpy>=1.24",
     "pydantic>=2.0",
     "anthropic>=0.40",
+    "metagen-dsl>=0.1.0",
+    "metagen-kernel>=0.1.0",
+    "metagen-simulator>=0.1.0",
 ]
+
+[project.scripts]
+# `conda install metagen-studio && metagen-studio` launches the packaged
+# studio (single uvicorn process serving the bundled SPA + /api routes).
+metagen-studio = "studio_backend.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["studio_backend*"]
+
+[tool.setuptools.package-data]
+# The bundled frontend is staged here at conda-build time
+# (see packaging/recipes/metagen-studio/build.sh in metagen-dev). It is
+# not present in dev checkouts; FastAPI handles its absence gracefully.
+"studio_backend" = ["_frontend_dist/**/*"]

@@ -9,9 +9,6 @@ REM   METAGEN_ANTHROPIC_API_KEY  enables /api/chat tab in the UI
 setlocal EnableDelayedExpansion
 
 set "STUDIO_DIR=%~dp0"
-pushd "%STUDIO_DIR%.."
-set "WORKSPACE=%CD%"
-popd
 
 if "%STUDIO_PY%"=="" (
   if not "%CONDA_PREFIX%"=="" (
@@ -45,10 +42,10 @@ REM cd into the backend so uvicorn's --reload watcher anchors there.
 REM Without this, --reload watches CWD (whatever opened the window) and
 REM if that happens to be a directory with node_modules / build outputs
 REM the WatchFiles tree-walk prevents the worker from starting.
-cd /d "%WORKSPACE%\studio\backend"
+cd /d "%STUDIO_DIR%backend"
 "%STUDIO_PY%" -m uvicorn studio_backend.main:app ^
   --host 0.0.0.0 --port %STUDIO_BACKEND_PORT% ^
-  --reload --reload-dir "%WORKSPACE%\studio\backend\studio_backend"
+  --reload --reload-dir "%STUDIO_DIR%backend\studio_backend"
 
 REM If uvicorn exits, pause so the user can see the error.
 echo.

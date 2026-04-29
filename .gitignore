@@ -4,7 +4,9 @@ frontend/.vite/
 frontend/tsconfig.tsbuildinfo
 backend/*.egg-info/
 backend/build/
+backend/dist/
 backend/__pycache__/
+backend/studio_backend/_frontend_dist/
 **/__pycache__/
 **/*.pyc
 .DS_Store

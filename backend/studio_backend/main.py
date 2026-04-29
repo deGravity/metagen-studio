@@ -1,7 +1,11 @@
 """FastAPI entry for the studio backend.
 
-Run from the workspace root:
-    uvicorn studio_backend.main:app --reload --app-dir studio/backend
+Two run modes share this module:
+- Dev: `uvicorn studio_backend.main:app --reload --app-dir backend`
+  (driven by run.sh / run.bat; vite serves the frontend on a separate port)
+- Packaged: the `metagen-studio` console script (see cli.py) launches a
+  single uvicorn that serves both /api routes and the bundled SPA from
+  `_frontend_dist/` mounted at /.
 """
 from __future__ import annotations
 
@@ -13,18 +17,26 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-# --- workspace path setup -------------------------------------------------
-# studio/backend/studio_backend/main.py → workspace root is parents[3].
-_WORKSPACE = Path(__file__).resolve().parents[3]
-for sub in ('metagen-dsl', 'metagen-kernel/build',
-            'metagen-simulator/build'):
-    p = str(_WORKSPACE / sub)
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-import metagen_dsl  # noqa: E402
-from metagen_dsl import _backend as dsl_backend  # noqa: E402
+# --- import metagen native packages ---------------------------------------
+# Try the normal import path first (packaged install, where metagen-dsl /
+# metagen-kernel / metagen-simulator are installed in the env). Fall back
+# to a dev-checkout sys.path injection: when running from a metagen-dev
+# workspace, the sibling submodules live two directories up from the
+# studio_backend package.
+try:
+    import metagen_dsl
+    from metagen_dsl import _backend as dsl_backend
+except ImportError:
+    _WORKSPACE = Path(__file__).resolve().parents[3]
+    for sub in ('metagen-dsl', 'metagen-kernel/build',
+                'metagen-simulator/build'):
+        p = str(_WORKSPACE / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import metagen_dsl  # noqa: E402
+    from metagen_dsl import _backend as dsl_backend  # noqa: E402
 
 from .models import (  # noqa: E402
     ExecuteRequest, ExecuteResponse, GeometryStats,
@@ -146,3 +158,13 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
         elapsed_sim_s=elapsed,
         cached=cached,
     )
+
+
+# --- bundled SPA mount (packaged mode) ------------------------------------
+# Must come AFTER all /api routes so the catch-all static mount at "/"
+# doesn't shadow them. In dev mode this directory doesn't exist and we
+# leave the frontend to vite on :5173.
+_FRONTEND_DIST = Path(__file__).parent / '_frontend_dist'
+if _FRONTEND_DIST.is_dir():
+    # html=True turns 404s into index.html so client-side routing works.
+    app.mount('/', StaticFiles(directory=_FRONTEND_DIST, html=True), name='frontend')

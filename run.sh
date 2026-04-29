@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Start the studio backend and frontend dev servers.
-# Usage:  ./studio/run.sh
+# Start the studio backend and frontend dev servers (development mode).
+# For a packaged install instead, use the `metagen-studio` CLI entry
+# point that ships with the conda package.
+#
+# Usage:  ./run.sh
 # Env:    STUDIO_BACKEND_PORT (default 8000), STUDIO_FRONTEND_PORT (default 5173)
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 
 PY="${STUDIO_PY:-/home/ben/miniconda3/envs/metamaterials-dev/bin/python}"
 BACKEND_PORT="${STUDIO_BACKEND_PORT:-8000}"
@@ -19,11 +22,11 @@ trap cleanup EXIT INT TERM
 
 echo "[studio] backend  → http://localhost:$BACKEND_PORT"
 "$PY" -m uvicorn studio_backend.main:app \
-  --app-dir studio/backend \
+  --app-dir backend \
   --host 0.0.0.0 --port "$BACKEND_PORT" \
   --reload &
 
 echo "[studio] frontend → http://localhost:$FRONTEND_PORT"
-( cd studio/frontend && npm run dev -- --port "$FRONTEND_PORT" --host ) &
+( cd frontend && npm run dev -- --port "$FRONTEND_PORT" --host ) &
 
 wait
