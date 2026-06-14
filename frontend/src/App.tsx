@@ -188,7 +188,7 @@ export default function App() {
             </button>
           </div>
           <div className="tab-body">
-            {tab === 'results' ? (
+            <div className="tab-panel" hidden={tab !== 'results'}>
               <ResultsPanel
                 geometry={geometry}
                 sim={sim}
@@ -196,7 +196,8 @@ export default function App() {
                 simStaleVsCode={simStale}
                 error={error}
               />
-            ) : (
+            </div>
+            <div className="tab-panel" hidden={tab !== 'chat'}>
               <ChatPanel
                 state={chatState}
                 available={info?.chat_available ?? false}
@@ -204,7 +205,7 @@ export default function App() {
                 onGeometryDone={chatGeometryDone}
                 onSimDone={chatSimDone}
               />
-            )}
+            </div>
           </div>
         </div>
       </div>

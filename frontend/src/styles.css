@@ -263,6 +263,14 @@ code {
 
 .tab-body > * { flex: 1; min-height: 0; }
 
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.tab-panel[hidden] { display: none; }
+.tab-panel > * { flex: 1; min-height: 0; }
+
 /* chat */
 .chat {
   display: flex;
