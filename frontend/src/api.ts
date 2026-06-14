@@ -1,7 +1,7 @@
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
   TpmsMode, SimBackend, MeshData,
-  ChatMessage, ChatStateContext, ChatEvent,
+  ChatMessage, ChatStateContext, ChatEvent, UploadResponse,
 } from './types';
 
 const API = '/api';
@@ -59,6 +59,19 @@ function decodeUint32(b64: string): Uint32Array {
   const view = new Uint8Array(buf);
   for (let i = 0; i < bytes.length; i++) view[i] = bytes.charCodeAt(i);
   return new Uint32Array(buf);
+}
+
+// --- chat uploads -------------------------------------------------------
+
+export async function uploadChatFile(file: File): Promise<UploadResponse> {
+  const form = new FormData();
+  form.append('file', file);
+  const r = await fetch(`${API}/chat/upload`, { method: 'POST', body: form });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail ?? `HTTP ${r.status}`);
+  }
+  return r.json();
 }
 
 // --- chat (SSE) ---------------------------------------------------------

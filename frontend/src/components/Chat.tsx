@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { streamChat } from '../api';
+import { streamChat, uploadChatFile } from '../api';
 import type {
   ChatMessage, ChatStateContext, AssistantBlock, PendingProposal,
+  Attachment, UserContentBlock,
 } from '../types';
 
 interface Props {
@@ -17,23 +18,115 @@ interface ChatTurn {
   role: 'user' | 'assistant';
   blocks?: AssistantBlock[];        // for assistant
   text?: string;                    // for user (raw text)
+  attachments?: Attachment[];       // for user (uploaded files)
   proposals?: PendingProposal[];    // proposals attached to this assistant turn
   toolResults?: { tool_id: string; name: string; result: any }[];
   streaming?: boolean;
 }
 
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const PDF_TYPE = 'application/pdf';
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;       // 5 MB per Anthropic guidance
+// PDFs go via the Files API (uploaded once, referenced by file_id), so
+// the inline 32 MB cap no longer applies. The backend enforces its own
+// sanity ceiling — see _UPLOAD_MAX_BYTES in chat.py.
+const MAX_PDF_BYTES = 100 * 1024 * 1024;       // 100 MB
+
 function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} kB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function readAsDataUrl(file: File): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error ?? new Error('read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+async function buildImageAttachment(file: File): Promise<Attachment> {
+  const dataUrl = await readAsDataUrl(file);
+  const comma = dataUrl.indexOf(',');
+  const meta = dataUrl.slice(0, comma);          // "data:image/png;base64"
+  const data = dataUrl.slice(comma + 1);
+  const mediaType = meta.slice(5, meta.indexOf(';'));
+  return {
+    id: makeId(),
+    kind: 'image',
+    mediaType,
+    filename: file.name || 'image',
+    size: file.size,
+    dataB64: data,
+    previewUrl: dataUrl,
+  };
+}
+
+function newPdfAttachment(file: File): Attachment {
+  return {
+    id: makeId(),
+    kind: 'document',
+    mediaType: 'application/pdf',
+    filename: file.name || 'document.pdf',
+    size: file.size,
+    uploading: true,
+  };
+}
+
+function validateFile(file: File): string | null {
+  if (IMAGE_TYPES.includes(file.type)) {
+    if (file.size > MAX_IMAGE_BYTES) {
+      return `image "${file.name}" exceeds ${humanSize(MAX_IMAGE_BYTES)} limit`;
+    }
+    return null;
+  }
+  if (file.type === PDF_TYPE) {
+    if (file.size > MAX_PDF_BYTES) {
+      return `pdf "${file.name}" exceeds ${humanSize(MAX_PDF_BYTES)} limit`;
+    }
+    return null;
+  }
+  return `unsupported type "${file.type || file.name}"; png/jpeg/gif/webp/pdf only`;
+}
+
+function attachmentToBlock(a: Attachment): UserContentBlock {
+  if (a.kind === 'image') {
+    if (!a.dataB64) throw new Error(`image ${a.filename} missing data`);
+    return {
+      type: 'image',
+      source: { type: 'base64', media_type: a.mediaType, data: a.dataB64 },
+    };
+  }
+  if (!a.fileId) throw new Error(`pdf ${a.filename} not yet uploaded`);
+  return {
+    type: 'document',
+    source: { type: 'file', file_id: a.fileId },
+  };
+}
+
+function buildUserContent(text: string, atts: Attachment[]): string | UserContentBlock[] {
+  if (atts.length === 0) return text;
+  const blocks: UserContentBlock[] = atts.map(attachmentToBlock);
+  if (text) blocks.push({ type: 'text', text });
+  return blocks;
 }
 
 export function ChatPanel(props: Props) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const proposalsRef = useRef<Map<string, string>>(new Map()); // proposalId → toolUseId for status updates
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -43,7 +136,10 @@ export function ChatPanel(props: Props) {
     const out: ChatMessage[] = [];
     for (const t of turns) {
       if (t.role === 'user') {
-        if (t.text) out.push({ role: 'user', content: t.text });
+        const text = t.text ?? '';
+        const atts = t.attachments ?? [];
+        if (!text && atts.length === 0) continue;
+        out.push({ role: 'user', content: buildUserContent(text, atts) });
       } else {
         const blocks = t.blocks ?? [];
         if (blocks.length > 0) out.push({ role: 'assistant', content: blocks });
@@ -52,12 +148,70 @@ export function ChatPanel(props: Props) {
     return out;
   }
 
+  async function addFiles(files: FileList | File[]) {
+    setError(null);
+    const arr = Array.from(files);
+    for (const f of arr) {
+      const err = validateFile(f);
+      if (err) { setError(err); continue; }
+      if (f.type === PDF_TYPE) {
+        const att = newPdfAttachment(f);
+        setPendingAttachments((cur) => [...cur, att]);
+        uploadChatFile(f)
+          .then((resp) => {
+            setPendingAttachments((cur) =>
+              cur.map((a) => a.id === att.id
+                ? { ...a, fileId: resp.file_id, uploading: false }
+                : a,
+              ),
+            );
+          })
+          .catch((e: any) => {
+            const msg = e?.message ?? String(e);
+            setPendingAttachments((cur) =>
+              cur.map((a) => a.id === att.id
+                ? { ...a, uploading: false, uploadError: msg }
+                : a,
+              ),
+            );
+            setError(`upload "${f.name}": ${msg}`);
+          });
+      } else {
+        try {
+          const att = await buildImageAttachment(f);
+          setPendingAttachments((cur) => [...cur, att]);
+        } catch (e: any) {
+          setError(`failed to read "${f.name}": ${e.message ?? e}`);
+        }
+      }
+    }
+  }
+
+  const uploadsPending = pendingAttachments.some((a) => a.uploading);
+  const uploadsFailed = pendingAttachments.some((a) => a.uploadError);
+
+  function removeAttachment(id: string) {
+    setPendingAttachments((cur) => cur.filter((a) => a.id !== id));
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    const atts = pendingAttachments;
+    if ((!text && atts.length === 0) || busy) return;
+    if (atts.some((a) => a.uploading)) {
+      setError('wait for attachments to finish uploading');
+      return;
+    }
+    if (atts.some((a) => a.uploadError)) {
+      setError('remove failed attachments before sending');
+      return;
+    }
     setError(null);
     setInput('');
-    const userTurn: ChatTurn = { id: makeId(), role: 'user', text, blocks: [] };
+    setPendingAttachments([]);
+    const userTurn: ChatTurn = {
+      id: makeId(), role: 'user', text, attachments: atts, blocks: [],
+    };
     const assistantTurn: ChatTurn = {
       id: makeId(), role: 'assistant', blocks: [], streaming: true,
       proposals: [], toolResults: [],
@@ -70,7 +224,7 @@ export function ChatPanel(props: Props) {
     try {
       const apiMessages: ChatMessage[] = [
         ...buildApiMessages(),
-        { role: 'user', content: text },
+        { role: 'user', content: buildUserContent(text, atts) },
       ];
       let liveText = '';
       for await (const ev of streamChat(apiMessages, props.state, ctl.signal)) {
@@ -233,10 +387,21 @@ export function ChatPanel(props: Props) {
         {error && <div className="chat-error">error: {error}</div>}
       </div>
       <div className="chat-input">
+        {pendingAttachments.length > 0 && (
+          <div className="chat-attachments">
+            {pendingAttachments.map((a) => (
+              <AttachmentChip
+                key={a.id}
+                attachment={a}
+                onRemove={() => removeAttachment(a.id)}
+              />
+            ))}
+          </div>
+        )}
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="message…"
+          placeholder={pendingAttachments.length ? 'add a message (optional)…' : 'message…'}
           rows={2}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -244,13 +409,57 @@ export function ChatPanel(props: Props) {
               send();
             }
           }}
+          onPaste={(e) => {
+            const files: File[] = [];
+            for (const item of Array.from(e.clipboardData.items)) {
+              if (item.kind === 'file') {
+                const f = item.getAsFile();
+                if (f) files.push(f);
+              }
+            }
+            if (files.length) {
+              e.preventDefault();
+              addFiles(files);
+            }
+          }}
           disabled={busy}
         />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            if (e.target.files) addFiles(e.target.files);
+            e.target.value = '';
+          }}
+        />
         <div className="chat-actions">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy}
+            title="attach image or PDF"
+          >
+            attach
+          </button>
           {busy ? (
             <button onClick={cancel}>cancel</button>
           ) : (
-            <button onClick={send} disabled={!input.trim()}>send</button>
+            <button
+              onClick={send}
+              disabled={
+                (!input.trim() && pendingAttachments.length === 0)
+                || uploadsPending || uploadsFailed
+              }
+              title={
+                uploadsPending ? 'waiting for upload…'
+                : uploadsFailed ? 'remove failed attachments'
+                : undefined
+              }
+            >
+              send
+            </button>
           )}
         </div>
       </div>
@@ -269,7 +478,14 @@ function Turn({ turn, onApply, onDiscard }: TurnProps) {
     return (
       <div className="msg msg-user">
         <div className="msg-role">you</div>
-        <div className="msg-text">{turn.text}</div>
+        {(turn.attachments?.length ?? 0) > 0 && (
+          <div className="chat-attachments">
+            {turn.attachments!.map((a) => (
+              <AttachmentChip key={a.id} attachment={a} />
+            ))}
+          </div>
+        )}
+        {turn.text && <div className="msg-text">{turn.text}</div>}
       </div>
     );
   }
@@ -328,6 +544,38 @@ function Turn({ turn, onApply, onDiscard }: TurnProps) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function AttachmentChip({
+  attachment, onRemove,
+}: { attachment: Attachment; onRemove?: () => void }) {
+  const status = attachment.uploading
+    ? 'uploading…'
+    : attachment.uploadError
+      ? `failed: ${attachment.uploadError}`
+      : humanSize(attachment.size);
+  const cls = [
+    'attachment',
+    `attachment-${attachment.kind}`,
+    attachment.uploading ? 'attachment-uploading' : '',
+    attachment.uploadError ? 'attachment-error' : '',
+  ].filter(Boolean).join(' ');
+  return (
+    <div className={cls}>
+      {attachment.previewUrl ? (
+        <img src={attachment.previewUrl} alt={attachment.filename} className="attachment-thumb" />
+      ) : (
+        <span className="attachment-icon">PDF</span>
+      )}
+      <span className="attachment-meta">
+        <span className="attachment-name">{attachment.filename}</span>
+        <span className="attachment-size">{status}</span>
+      </span>
+      {onRemove && (
+        <button className="attachment-remove" onClick={onRemove} title="remove">×</button>
+      )}
     </div>
   );
 }

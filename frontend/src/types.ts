@@ -48,9 +48,38 @@ export type AssistantBlock =
 
 export type ToolResultBlock = { type: 'tool_result'; tool_use_id: string; content: string };
 
+export type UserContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'document'; source:
+      | { type: 'base64'; media_type: 'application/pdf'; data: string }
+      | { type: 'file'; file_id: string } };
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
-  content: string | (AssistantBlock | ToolResultBlock)[];
+  content: string | (UserContentBlock | AssistantBlock | ToolResultBlock)[];
+}
+
+export interface Attachment {
+  id: string;
+  kind: 'image' | 'document';
+  mediaType: string;       // e.g. 'image/png', 'application/pdf'
+  filename: string;
+  size: number;
+  // Inline for images; PDFs are uploaded to the Files API up front and
+  // referenced by file_id, so document attachments carry fileId instead.
+  dataB64?: string;
+  fileId?: string;
+  previewUrl?: string;     // data URL for image thumbnails
+  uploading?: boolean;     // pending Files API upload (PDFs only)
+  uploadError?: string;
+}
+
+export interface UploadResponse {
+  file_id: string;
+  filename: string;
+  size: number;
+  media_type: string;
 }
 
 export interface ChatStateContext {

@@ -24,8 +24,10 @@ from typing import Any, AsyncIterator, Optional
 
 import numpy as np
 from anthropic import AsyncAnthropic
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+
+from metagen_dsl.docs import render_llm as _render_dsl_docs
 
 from .models import ChatRequest, ChatStateContext
 from .state import program_cache
@@ -229,14 +231,36 @@ structures. Multigrid-valid (i.e. GPU-eligible) resolutions: 17, 33, 49,
 """
 
 
-def _state_preamble(state: ChatStateContext) -> str:
-    """Inject current code + last-run artifacts as a system-prompt suffix."""
+# Auto-generated DSL API reference, rendered from docstrings in metagen_dsl.
+# Cached at module level; ~6k tokens. Set METAGEN_DSL_DOCS_NO_CACHE=1 to
+# re-render on every request (useful when iterating on docstrings).
+_DSL_API_DOCS_CACHE: Optional[str] = None
+
+
+def _get_dsl_api_docs() -> str:
+    global _DSL_API_DOCS_CACHE
+    if os.environ.get('METAGEN_DSL_DOCS_NO_CACHE') == '1':
+        return _render_dsl_docs()
+    if _DSL_API_DOCS_CACHE is None:
+        _DSL_API_DOCS_CACHE = _render_dsl_docs()
+    return _DSL_API_DOCS_CACHE
+
+
+def _static_system_text() -> str:
+    return (
+        SYSTEM_PROMPT
+        + "\n--- metaDSL API reference ---\n"
+        + _get_dsl_api_docs()
+    )
+
+
+def _workspace_state_text(state: ChatStateContext) -> str:
     code_hash = _hash12(state.code)
-    parts = [SYSTEM_PROMPT, "\n--- workspace state ---"]
-    parts.append(f"current code (hash {code_hash}):")
-    parts.append("```python")
-    parts.append(state.code)
-    parts.append("```")
+    parts = ["--- workspace state ---",
+             f"current code (hash {code_hash}):",
+             "```python",
+             state.code,
+             "```"]
 
     if state.geometry_summary:
         gh = state.geometry_code_hash
@@ -250,7 +274,6 @@ def _state_preamble(state: ChatStateContext) -> str:
         stale = (sh and sh != code_hash)
         parts.append(f"\nlast simulation run "
                      f"({'STALE — code edited since' if stale else 'current'}):")
-        # Drop the C matrix from the preamble (verbose); keep summary props.
         s = {k: v for k, v in state.sim_summary.items() if k != 'C_matrix'}
         parts.append(json.dumps(s, indent=2))
 
@@ -258,6 +281,20 @@ def _state_preamble(state: ChatStateContext) -> str:
         parts.append(f"\nlast error:\n{state.last_error}")
 
     return "\n".join(parts)
+
+
+def _system_blocks(state: ChatStateContext) -> list[dict]:
+    return [
+        {
+            'type': 'text',
+            'text': _static_system_text(),
+            'cache_control': {'type': 'ephemeral'},
+        },
+        {
+            'type': 'text',
+            'text': _workspace_state_text(state),
+        },
+    ]
 
 
 def _hash12(s: str) -> str:
@@ -280,7 +317,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
         return
 
     client = AsyncAnthropic(api_key=api_key)
-    system = _state_preamble(req.state)
+    system = _system_blocks(req.state)
 
     # Model expects content as list[dict] for assistant turns, but plain
     # str works for user messages — normalize.
@@ -297,6 +334,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
             async with client.messages.stream(
                 model=req.model, max_tokens=req.max_tokens,
                 messages=api_messages, system=system, tools=TOOLS,
+                extra_headers={'anthropic-beta': 'files-api-2025-04-14'},
             ) as stream:
                 # Track in-flight content blocks so we can reconstruct
                 # the final assistant message for the next turn.
@@ -382,3 +420,47 @@ async def chat_endpoint(req: ChatRequest):
             detail='Set METAGEN_ANTHROPIC_API_KEY in the backend env to enable chat.',
         )
     return StreamingResponse(_agent_loop(req), media_type='text/event-stream')
+
+
+# Files API cap; documented limit on the upload side is much higher,
+# but we keep a sanity ceiling so a bad client can't run the backend
+# out of memory. Bump if you need to.
+_UPLOAD_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
+
+
+@router.post('/api/chat/upload')
+async def chat_upload(file: UploadFile = File(...)):
+    """Proxy a single file upload to Anthropic's Files API.
+
+    Returns the opaque file_id which the frontend then references in
+    subsequent chat turns via a `document` block with `source.type=file`.
+    Avoids re-shipping large PDFs on every turn.
+    """
+    api_key = os.environ.get('METAGEN_ANTHROPIC_API_KEY')
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail='Set METAGEN_ANTHROPIC_API_KEY in the backend env to enable uploads.',
+        )
+
+    content = await file.read()
+    if len(content) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f'file exceeds {_UPLOAD_MAX_BYTES // (1024 * 1024)} MB cap',
+        )
+
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        result = await client.beta.files.upload(
+            file=(file.filename, content, file.content_type or 'application/octet-stream'),
+        )
+    except Exception as e:  # noqa: BLE001 — surface API errors as 502
+        raise HTTPException(status_code=502, detail=f'Anthropic upload failed: {e}')
+
+    return {
+        'file_id': result.id,
+        'filename': file.filename,
+        'size': len(content),
+        'media_type': file.content_type,
+    }
