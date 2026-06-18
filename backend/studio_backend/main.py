@@ -41,12 +41,13 @@ except ImportError:
 
 from .models import (  # noqa: E402
     ExecuteRequest, ExecuteResponse, GeometryStats,
-    SimulateRequest, SimulateResponse, InfoResponse,
+    SimulateRequest, SimulateResponse, InfoResponse, CodeRequest,
 )
 from .state import program_cache as _program_cache  # noqa: E402
 from .execute import hash_code  # noqa: E402
 from .chat import router as chat_router  # noqa: E402
 from .kernel_job import stream_geometry, JOBS  # noqa: E402
+from . import results_cache  # noqa: E402
 
 
 app = FastAPI(title="metaDSL Studio Backend")
@@ -127,7 +128,7 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
     vox = np.asarray(geo.voxel_active_cells)
     n_active = int(vox.sum())
 
-    return ExecuteResponse(
+    resp = ExecuteResponse(
         code_hash=compiled.code_hash,
         resolution=req.resolution,
         tpms_optimizer_mode=req.tpms_optimizer_mode,
@@ -144,6 +145,8 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
         elapsed_geometry_s=elapsed,
         cached=cached,
     )
+    results_cache.put_geometry(compiled.code_hash, {**resp.model_dump(), 'cached': True})
+    return resp
 
 
 @app.post('/api/execute/stream')
@@ -194,7 +197,7 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
                           E=req.E, nu=req.nu)
     elapsed = time.perf_counter() - t0
 
-    return SimulateResponse(
+    resp = SimulateResponse(
         code_hash=compiled.code_hash,
         resolution=req.resolution,
         tpms_optimizer_mode=req.tpms_optimizer_mode,
@@ -204,6 +207,15 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
         elapsed_sim_s=elapsed,
         cached=cached,
     )
+    results_cache.put_sim(compiled.code_hash, {**resp.model_dump(), 'cached': True})
+    return resp
+
+
+@app.post('/api/results/cached')
+def results_cached(req: CodeRequest):
+    """Latest cached geometry/sim for a given program (by code hash), so an
+    accepted proposal can reuse what the copilot already computed."""
+    return results_cache.get(hash_code(req.code))
 
 
 # --- bundled SPA mount (packaged mode) ------------------------------------

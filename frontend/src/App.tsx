@@ -4,7 +4,7 @@ import { Viewer3D } from './components/Viewer3D';
 import { SettingsPanel } from './components/Settings';
 import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
-import { simulate, getInfo, decodeMesh, streamExecute, cancelJob } from './api';
+import { simulate, getInfo, decodeMesh, streamExecute, cancelJob, getCachedResults } from './api';
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
   TpmsMode, SimBackend, MeshData, ChatStateContext,
@@ -126,10 +126,23 @@ export default function App() {
     }
   }
 
-  function applyProposal(newCode: string) {
+  async function applyProposal(newCode: string) {
     setCode(newCode);
-    // Geometry/sim viewing data is now stale by definition; the staleness
-    // tag will surface that. Don't auto-rerun.
+    // If the copilot already ran geometry/sim on this exact code, reuse those
+    // results so the viewer and results panel jump straight to up-to-date
+    // instead of showing stale data until a manual re-run.
+    try {
+      const cached = await getCachedResults(newCode);
+      if (cached.geometry) {
+        setGeometry(cached.geometry);
+        setMesh(decodeMesh(cached.geometry));
+        setResolution(cached.geometry.resolution);
+        if (cached.geometry.tpms_optimizer_mode) setTpmsMode(cached.geometry.tpms_optimizer_mode);
+      }
+      if (cached.sim) setSim(cached.sim);
+    } catch {
+      /* no cached results — leave panels as-is (staleness tag will show) */
+    }
   }
 
   // Chat's run_geometry tool now returns the mesh in its UI event, so update

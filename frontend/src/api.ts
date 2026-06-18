@@ -105,6 +105,17 @@ function parseExecSSE(chunk: string): ExecEvent | null {
   }
 }
 
+export interface CachedResults {
+  geometry: ExecuteResponse | null;
+  sim: SimulateResponse | null;
+}
+
+// Latest geometry/sim the backend has computed for this exact code (by hash) —
+// used to reuse a copilot-run generation/sim when its proposal is accepted.
+export async function getCachedResults(code: string): Promise<CachedResults> {
+  return postJson('/results/cached', { code });
+}
+
 export async function cancelJob(jobId: string): Promise<void> {
   await fetch(`${API}/jobs/${jobId}/cancel`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',

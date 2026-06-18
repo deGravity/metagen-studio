@@ -197,6 +197,20 @@ async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict,
         'elapsed_s': elapsed,
         'ran': 'candidate' if candidate else 'editor',
     }
+    # Cache the full result (incl mesh) keyed by this code's hash, so that if
+    # the user accepts a proposal of this code we can reuse it immediately.
+    from . import results_cache
+    results_cache.put_geometry(compiled.code_hash, {
+        'code_hash': compiled.code_hash, 'resolution': resolution,
+        'tpms_optimizer_mode': mode,
+        'stats': {'cell_resolution': g['cell_resolution'],
+                  'volume_fraction': g['volume_fraction'],
+                  'n_vertices': g['n_vertices'], 'n_triangles': g['n_triangles'],
+                  'n_active_voxels': g['n_active_voxels'],
+                  'n_total_voxels': g['n_total_voxels']},
+        'vertices_b64': g['vertices_b64'], 'triangles_b64': g['triangles_b64'],
+        'elapsed_geometry_s': round(elapsed, 3), 'cached': True,
+    })
     # Candidate (background) runs do NOT touch the user's viewer — return an
     # empty ui event so nothing is rendered. Editor runs update the viewer,
     # carrying the mesh so it refreshes without a second (blocking) refetch.
@@ -239,6 +253,13 @@ async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dic
         'elapsed_s': elapsed,
         'ran': 'candidate' if candidate else 'editor',
     }
+    from . import results_cache
+    results_cache.put_sim(compiled.code_hash, {
+        'code_hash': compiled.code_hash, 'resolution': resolution,
+        'tpms_optimizer_mode': mode, 'backend_used': s['solver_used'],
+        'C_matrix': s['C_matrix'], 'properties': s['properties'],
+        'elapsed_sim_s': round(elapsed, 3), 'cached': True,
+    })
     # Background candidate sims don't overwrite the user's results panel.
     if candidate:
         return ({'ok': True, **summary}, {})

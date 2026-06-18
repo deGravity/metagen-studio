@@ -237,6 +237,8 @@ async def stream_geometry(code: str, resolution: int, multistart_k: int,
             'elapsed_geometry_s': round(time.time() - job.started, 2),
             'cached': False,
         }
+        from . import results_cache
+        results_cache.put_geometry(code_hash, {**result, 'cached': True})
         yield _sse('result', result)
     except Exception as e:  # noqa: BLE001
         yield _sse('error', {'message': f'failed to read kernel result: {e}'})

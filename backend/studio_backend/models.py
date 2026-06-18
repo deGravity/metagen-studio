@@ -52,6 +52,10 @@ class SimulateResponse(BaseModel):
     cached: bool
 
 
+class CodeRequest(BaseModel):
+    code: str
+
+
 class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
