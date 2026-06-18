@@ -40,12 +40,10 @@ async function hashCode(code: string): Promise<string> {
     .map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-type RightTab = 'results' | 'chat';
-
 export default function App() {
   const [code, setCode] = useState(DEFAULT_CODE);
   const [currentHash, setCurrentHash] = useState<string>('');
-  const [resolution, setResolution] = useState(33);
+  const [resolution, setResolution] = useState(65);
   const [tpmsMode, setTpmsMode] = useState<TpmsMode>('current');
   const [simBackend, setSimBackend] = useState<SimBackend>('auto');
   const [geometry, setGeometry] = useState<ExecuteResponse | null>(null);
@@ -54,11 +52,30 @@ export default function App() {
   const [info, setInfo] = useState<InfoResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<RightTab>('results');
   const [progress, setProgress] = useState<
     { phase: string; attempt?: number; elapsed?: number; detail?: string } | null
   >(null);
+  const [chatHeight, setChatHeight] = useState(320);
   const jobIdRef = useRef<string | null>(null);
+
+  // Drag the splitter between the editor and the chat dock to resize the chat.
+  function startChatDrag(e: React.MouseEvent) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = chatHeight;
+    const onMove = (ev: MouseEvent) => {
+      const h = startH + (startY - ev.clientY);
+      setChatHeight(Math.max(120, Math.min(h, window.innerHeight - 240)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'row-resize';
+  }
 
   useEffect(() => {
     getInfo().then(setInfo).catch((e) => setError(`info: ${e.message}`));
@@ -188,7 +205,21 @@ export default function App() {
       </header>
       <div className="layout">
         <div className="pane editor-pane">
-          <CodeEditor value={code} onChange={setCode} />
+          <div className="editor-wrap">
+            <CodeEditor value={code} onChange={setCode} />
+          </div>
+          <div className="vsplit" onMouseDown={startChatDrag}
+               title="drag to resize the copilot panel" />
+          <div className="chat-dock" style={{ height: chatHeight }}>
+            <div className="chat-dock-title">Copilot</div>
+            <ChatPanel
+              state={chatState}
+              available={info?.chat_available ?? false}
+              onApplyProposal={applyProposal}
+              onGeometryDone={chatGeometryDone}
+              onSimDone={chatSimDone}
+            />
+          </div>
         </div>
         <div className="pane viewer-pane">
           <Viewer3D mesh={mesh} />
@@ -209,39 +240,14 @@ export default function App() {
             busy={busy}
             progress={progress}
           />
-          <div className="tabs">
-            <button
-              className={tab === 'results' ? 'tab active' : 'tab'}
-              onClick={() => setTab('results')}
-            >
-              Results
-            </button>
-            <button
-              className={tab === 'chat' ? 'tab active' : 'tab'}
-              onClick={() => setTab('chat')}
-            >
-              Copilot
-            </button>
-          </div>
-          <div className="tab-body">
-            <div className="tab-panel" hidden={tab !== 'results'}>
-              <ResultsPanel
-                geometry={geometry}
-                sim={sim}
-                geomStaleVsCode={geomStale}
-                simStaleVsCode={simStale}
-                error={error}
-              />
-            </div>
-            <div className="tab-panel" hidden={tab !== 'chat'}>
-              <ChatPanel
-                state={chatState}
-                available={info?.chat_available ?? false}
-                onApplyProposal={applyProposal}
-                onGeometryDone={chatGeometryDone}
-                onSimDone={chatSimDone}
-              />
-            </div>
+          <div className="right-body">
+            <ResultsPanel
+              geometry={geometry}
+              sim={sim}
+              geomStaleVsCode={geomStale}
+              simStaleVsCode={simStale}
+              error={error}
+            />
           </div>
         </div>
       </div>

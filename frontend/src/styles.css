@@ -253,50 +253,45 @@ code {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
 }
 
-/* tabs */
-.tabs {
+/* editor + copilot dock (left column) */
+.editor-wrap { flex: 1; min-height: 0; }
+.editor-wrap > * { height: 100%; }
+
+.vsplit {
+  flex: none;
+  height: 6px;
+  background: #2a2a2a;
+  cursor: row-resize;
+}
+.vsplit:hover { background: #4a90e2; }
+
+.chat-dock {
+  flex: none;
+  min-height: 0;
   display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #141414;
   border-top: 1px solid #2a2a2a;
-  border-bottom: 1px solid #2a2a2a;
-  background: #131313;
 }
 
-.tabs .tab {
-  flex: 1;
-  background: none;
-  color: #888;
-  border: none;
-  padding: 8px 12px;
+.chat-dock-title {
+  flex: none;
+  padding: 6px 12px;
   font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
+  color: #aaa;
+  background: #131313;
+  border-bottom: 1px solid #2a2a2a;
 }
 
-.tabs .tab:hover { color: #ccc; }
-.tabs .tab.active {
-  color: #e8e8e8;
-  border-bottom-color: #4a90e2;
-}
+/* let the chat fill the dock below its title (override its height:100%) */
+.chat-dock > .chat { flex: 1; min-height: 0; height: auto; }
 
-.tab-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.tab-body > * { flex: 1; min-height: 0; }
-
-.tab-panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.tab-panel[hidden] { display: none; }
-.tab-panel > * { flex: 1; min-height: 0; }
+/* right pane body (results), scrollable */
+.right-body { flex: 1; min-height: 0; overflow-y: auto; }
 
 /* chat */
 .chat {
