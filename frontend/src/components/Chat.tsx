@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { streamChat, uploadChatFile } from '../api';
 import type {
   ChatMessage, ChatStateContext, AssistantBlock, PendingProposal,
@@ -494,7 +496,11 @@ function Turn({ turn, onApply, onDiscard }: TurnProps) {
       <div className="msg-role">copilot {turn.streaming && <span className="streaming">…</span>}</div>
       {(turn.blocks ?? []).map((b, i) => {
         if (b.type === 'text') {
-          return <div key={i} className="msg-text">{b.text}</div>;
+          return (
+            <div key={i} className="msg-text markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.text}</ReactMarkdown>
+            </div>
+          );
         }
         if (b.type === 'tool_use') {
           if (b.name === 'propose_edit') return null; // shown via proposals card
