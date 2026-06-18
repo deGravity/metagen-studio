@@ -11,8 +11,20 @@ interface Props {
   validGpuResolutions: number[];
   onRunGeometry: () => void;
   onRunSim: () => void;
+  onCancel: () => void;
   busy: boolean;
+  progress: { phase: string; attempt?: number; elapsed?: number; detail?: string } | null;
 }
+
+const PHASE_LABEL: Record<string, string> = {
+  starting: 'starting kernel…',
+  working: 'working…',
+  multistart: 'TPMS multistart',
+  local_opt: 'local optimization (BOBYQA)',
+  global_opt: 'global optimization',
+  solve: 'solving surface',
+  remesh: 'remeshing',
+};
 
 const COMMON_RES = [17, 33, 49, 65, 97, 100, 129];
 
@@ -63,7 +75,25 @@ export function SettingsPanel(props: Props) {
         <button onClick={props.onRunSim} disabled={props.busy}>
           {props.busy ? '…' : 'Simulate'}
         </button>
+        {props.busy && (
+          <button className="cancel" onClick={props.onCancel}>Cancel</button>
+        )}
       </div>
+
+      {props.busy && props.progress && (
+        <div className="progress-line">
+          <span className="spinner">⟳</span>{' '}
+          {PHASE_LABEL[props.progress.phase] ?? props.progress.phase}
+          {props.progress.phase === 'multistart' && props.progress.attempt != null
+            && ` · attempt ${props.progress.attempt}`}
+          {props.progress.elapsed != null && ` · ${props.progress.elapsed.toFixed(1)}s`}
+          {props.progress.detail && (
+            <div className="progress-detail" title={props.progress.detail}>
+              {props.progress.detail}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

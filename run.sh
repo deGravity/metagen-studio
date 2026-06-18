@@ -40,11 +40,15 @@ watchdog() {
   # Health-poll the backend. If /api/info doesn't respond for
   # WATCHDOG_FAIL_THRESHOLD consecutive polls, log loudly and TERM
   # the parent script so the trap fires and tears everything down.
+  # Tolerant by design: geometry now runs in a subprocess so /api/info stays
+  # responsive during long TPMS solves, but /api/simulate is still synchronous
+  # and can hold the GIL for a while. Use a generous timeout + threshold so a
+  # legitimately busy backend isn't mistaken for a zombie worker.
   local startup_grace=15
   local interval=5
-  local timeout=3
+  local timeout=10
   local fails=0
-  local max_fails=3
+  local max_fails=6
   sleep "$startup_grace"
   while sleep "$interval"; do
     if curl -sf -m "$timeout" -o /dev/null "http://localhost:$BACKEND_PORT/api/info"; then

@@ -156,7 +156,7 @@ async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict,
     t0 = time.perf_counter()
     geo = await asyncio.to_thread(
         compiled.structure.geometry,
-        resolution=resolution, tpms_optimizer_mode=mode)
+        resolution=resolution, tpms_multistart_k=(1 if mode == 'current' else 8))
     elapsed = time.perf_counter() - t0
     summary = _geometry_summary(geo, compiled.code_hash, resolution, mode)
     summary['elapsed_s'] = elapsed
@@ -178,7 +178,7 @@ async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dic
     # Prime geometry cache with the right mode first.
     await asyncio.to_thread(
         compiled.structure.geometry,
-        resolution=resolution, tpms_optimizer_mode=mode)
+        resolution=resolution, tpms_multistart_k=(1 if mode == 'current' else 8))
     t0 = time.perf_counter()
     sim = await asyncio.to_thread(
         compiled.structure.simulate,

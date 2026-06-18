@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CodeEditor } from './components/Editor';
 import { Viewer3D } from './components/Viewer3D';
 import { SettingsPanel } from './components/Settings';
 import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
-import { executeCode, simulate, getInfo, decodeMesh } from './api';
+import { executeCode, simulate, getInfo, decodeMesh, streamExecute, cancelJob } from './api';
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
   TpmsMode, SimBackend, MeshData, ChatStateContext,
@@ -55,6 +55,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<RightTab>('results');
+  const [progress, setProgress] = useState<
+    { phase: string; attempt?: number; elapsed?: number; detail?: string } | null
+  >(null);
+  const jobIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     getInfo().then(setInfo).catch((e) => setError(`info: ${e.message}`));
@@ -65,16 +69,32 @@ export default function App() {
   }, [code]);
 
   async function runGeometry() {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setProgress({ phase: 'starting' });
+    jobIdRef.current = null;
     try {
-      const r = await executeCode(code, resolution, tpmsMode);
-      setGeometry(r);
-      setMesh(decodeMesh(r));
+      for await (const ev of streamExecute(code, resolution, tpmsMode)) {
+        if (ev.kind === 'job') {
+          jobIdRef.current = ev.job_id;
+        } else if (ev.kind === 'progress') {
+          setProgress({ phase: ev.phase, attempt: ev.attempt, elapsed: ev.elapsed, detail: ev.detail });
+        } else if (ev.kind === 'result') {
+          setGeometry(ev.resp);
+          setMesh(decodeMesh(ev.resp));
+        } else if (ev.kind === 'cancelled') {
+          setError('geometry run cancelled');
+        } else if (ev.kind === 'error') {
+          setError(ev.message);
+        }
+      }
     } catch (e: any) {
       setError(e.message ?? String(e));
     } finally {
-      setBusy(false);
+      setBusy(false); setProgress(null); jobIdRef.current = null;
     }
+  }
+
+  async function cancelGeometry() {
+    if (jobIdRef.current) await cancelJob(jobIdRef.current);
   }
 
   async function runSim() {
@@ -171,7 +191,9 @@ export default function App() {
             validGpuResolutions={info?.valid_gpu_resolutions ?? []}
             onRunGeometry={runGeometry}
             onRunSim={runSim}
+            onCancel={cancelGeometry}
             busy={busy}
+            progress={progress}
           />
           <div className="tabs">
             <button

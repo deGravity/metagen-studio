@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 # --- import metagen native packages ---------------------------------------
@@ -43,7 +44,9 @@ from .models import (  # noqa: E402
     SimulateRequest, SimulateResponse, InfoResponse,
 )
 from .state import program_cache as _program_cache  # noqa: E402
+from .execute import hash_code  # noqa: E402
 from .chat import router as chat_router  # noqa: E402
+from .kernel_job import stream_geometry, JOBS  # noqa: E402
 
 
 app = FastAPI(title="metaDSL Studio Backend")
@@ -57,7 +60,24 @@ app.add_middleware(
 
 app.include_router(chat_router)
 
+
+@app.on_event('shutdown')
+def _kill_inflight_jobs():
+    # Don't let long kernel solves orphan when the server stops or reloads.
+    JOBS.cancel_all()
+
 _GPU_VALID_DIMS = [16, 32, 48, 64, 96, 128]
+
+# The DSL's old `tpms_optimizer_mode` (current/global/experimental) was
+# replaced by an integer `tpms_multistart_k` (best-of-K in-kernel multistart).
+# Map the legacy UI modes onto K so the existing frontend keeps working:
+#   current      -> 1  (single solve, production default)
+#   global/exper. -> 8 (multistart)
+_TPMS_MODE_K = {'current': 1, 'global': 8, 'experimental': 8}
+
+
+def _multistart_k(mode: str) -> int:
+    return _TPMS_MODE_K.get(mode, 1)
 
 
 def _b64(arr: np.ndarray, dtype) -> str:
@@ -100,7 +120,7 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
 
     t0 = time.perf_counter()
     geo = struct.geometry(resolution=req.resolution,
-                          tpms_optimizer_mode=req.tpms_optimizer_mode)
+                          tpms_multistart_k=_multistart_k(req.tpms_optimizer_mode))
     elapsed = time.perf_counter() - t0
 
     verts, tris = _pick_mesh(geo)
@@ -126,6 +146,32 @@ def execute(req: ExecuteRequest) -> ExecuteResponse:
     )
 
 
+@app.post('/api/execute/stream')
+async def execute_stream(req: ExecuteRequest):
+    """Streaming geometry: runs the kernel in a subprocess so the event loop
+    stays responsive, emitting SSE progress events (job → progress* →
+    result|error|cancelled → done). The 'result' event carries the same
+    payload shape as ExecuteResponse."""
+    return StreamingResponse(
+        stream_geometry(req.code, req.resolution,
+                        _multistart_k(req.tpms_optimizer_mode),
+                        req.tpms_optimizer_mode, hash_code(req.code)),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@app.post('/api/jobs/{job_id}/cancel')
+def cancel_job(job_id: str):
+    """Kill a running geometry job's process group."""
+    return {'ok': JOBS.cancel(job_id)}
+
+
+@app.get('/api/jobs')
+def list_jobs():
+    return {'jobs': JOBS.list()}
+
+
 @app.post('/api/simulate', response_model=SimulateResponse)
 def simulate(req: SimulateRequest) -> SimulateResponse:
     compiled = _program_cache.get_or_compile(req.code)
@@ -141,7 +187,7 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
     # resolution alone — so call .geometry() first (which is mode-aware)
     # to populate the cache, then .simulate() will pick that up.
     struct.geometry(resolution=req.resolution,
-                    tpms_optimizer_mode=req.tpms_optimizer_mode)
+                    tpms_multistart_k=_multistart_k(req.tpms_optimizer_mode))
 
     t0 = time.perf_counter()
     sim = struct.simulate(resolution=req.resolution, backend=req.backend,

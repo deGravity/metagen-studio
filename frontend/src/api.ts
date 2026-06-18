@@ -38,6 +38,79 @@ export async function simulate(
   return postJson('/simulate', { code, resolution, tpms_optimizer_mode, backend, E, nu });
 }
 
+// --- streaming geometry (SSE) with live progress + cancellation ----------
+
+export type ExecEvent =
+  | { kind: 'job'; job_id: string }
+  | { kind: 'progress'; phase: string; attempt?: number; elapsed?: number; detail?: string }
+  | { kind: 'result'; resp: ExecuteResponse }
+  | { kind: 'error'; message: string }
+  | { kind: 'cancelled' }
+  | { kind: 'done' };
+
+export async function* streamExecute(
+  code: string, resolution: number, tpms_optimizer_mode: TpmsMode,
+  signal?: AbortSignal,
+): AsyncGenerator<ExecEvent> {
+  const r = await fetch(`${API}/execute/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, resolution, tpms_optimizer_mode }),
+    signal,
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`execute failed: ${r.status} ${detail}`);
+  }
+  if (!r.body) throw new Error('execute: no response body');
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const ev = parseExecSSE(chunk);
+      if (ev) yield ev;
+    }
+  }
+}
+
+function parseExecSSE(chunk: string): ExecEvent | null {
+  let event = '';
+  let data = '';
+  for (const line of chunk.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
+  }
+  if (!event) return null;
+  try {
+    const d = data ? JSON.parse(data) : {};
+    switch (event) {
+      case 'job': return { kind: 'job', job_id: d.job_id };
+      case 'progress': return { kind: 'progress', phase: d.phase, attempt: d.attempt, elapsed: d.elapsed, detail: d.detail };
+      case 'result': return { kind: 'result', resp: d as ExecuteResponse };
+      case 'error': return { kind: 'error', message: d.message };
+      case 'cancelled': return { kind: 'cancelled' };
+      case 'done': return { kind: 'done' };
+      default: return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+export async function cancelJob(jobId: string): Promise<void> {
+  await fetch(`${API}/jobs/${jobId}/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  }).catch(() => { /* best-effort */ });
+}
+
 export function decodeMesh(resp: ExecuteResponse): MeshData {
   return {
     vertices: decodeFloat32(resp.vertices_b64),
