@@ -65,10 +65,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "run_geometry",
         "description": (
-            "Generate the voxelized geometry from the current code at the "
-            "given resolution and TPMS optimizer mode. Returns volume "
-            "fraction, fill fraction, and mesh vertex/triangle counts. "
-            "The user's 3D viewer is updated with the resulting mesh."
+            "Generate the voxelized geometry at the given resolution and TPMS "
+            "optimizer mode. Returns volume fraction, fill fraction, and mesh "
+            "vertex/triangle counts. By default runs the user's current editor "
+            "code (and updates their 3D viewer). Pass `code` to instead test a "
+            "candidate program privately, in the background, without touching "
+            "the editor or viewer — use this to try an idea before proposing it."
         ),
         "input_schema": {
             "type": "object",
@@ -86,15 +88,24 @@ TOOLS: list[dict[str, Any]] = [
                                    "'global' is deterministic but ~10x slower (adds ESCH "
                                    "global pre-search). Default: current.",
                 },
+                "code": {
+                    "type": "string",
+                    "description": "Optional. A candidate make_structure() program to run "
+                                   "INSTEAD of the user's editor code. Use this to test an "
+                                   "idea in your own reasoning before proposing it via "
+                                   "propose_edit. Omit to run the user's current code.",
+                },
             },
         },
     },
     {
         "name": "run_simulation",
         "description": (
-            "Run periodic-homogenization on the current geometry. Returns "
-            "the 6x6 stiffness matrix C, plus derived properties (E, K, G, "
-            "ν, anisotropy indices). Auto-runs geometry if not yet cached."
+            "Run periodic-homogenization on the geometry. Returns the 6x6 "
+            "stiffness matrix C, plus derived properties (E, K, G, ν, anisotropy "
+            "indices). Auto-runs geometry first. By default uses the user's "
+            "current editor code; pass `code` to test a candidate program "
+            "privately (in the background) without touching the editor/viewer."
         ),
         "input_schema": {
             "type": "object",
@@ -109,6 +120,12 @@ TOOLS: list[dict[str, Any]] = [
                 "tpms_optimizer_mode": {
                     "type": "string",
                     "enum": ["current", "global", "experimental"],
+                },
+                "code": {
+                    "type": "string",
+                    "description": "Optional. A candidate make_structure() program to "
+                                   "simulate INSTEAD of the user's editor code, privately "
+                                   "in the background. Omit to use the user's current code.",
                 },
                 "E": {"type": "number", "description": "Young's modulus of solid material. Default 1.0."},
                 "nu": {"type": "number", "description": "Poisson's ratio. Default 0.45."},
@@ -151,18 +168,21 @@ async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict,
     resolution = int(args.get('resolution', 33))
     mode = args.get('tpms_optimizer_mode', 'current')
     k = 1 if mode == 'current' else 8
-    compiled = program_cache.get_or_compile(state.code)
+    code = args.get('code') or state.code
+    candidate = bool(args.get('code')) and args['code'] != state.code
+    compiled = program_cache.get_or_compile(code)
     if compiled.error:
-        return ({'ok': False, 'error': compiled.error}, {})
+        return ({'ok': False, 'error': compiled.error, 'ran': 'candidate' if candidate else 'editor'}, {})
     # Run the kernel in a subprocess so the chat SSE stream (on the event
     # loop) keeps flowing — an in-process solve holds the GIL and would drop
     # the chat connection ("network error").
     from .kernel_job import run_geometry_result
     t0 = time.perf_counter()
     try:
-        g = await run_geometry_result(state.code, resolution, k)
+        g = await run_geometry_result(code, resolution, k)
     except Exception as e:  # noqa: BLE001
-        return ({'ok': False, 'error': str(e)}, {})
+        return ({'ok': False, 'error': str(e),
+                 'ran': 'candidate' if candidate else 'editor'}, {})
     elapsed = time.perf_counter() - t0
     summary = {
         'code_hash': compiled.code_hash,
@@ -175,9 +195,13 @@ async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict,
         'n_active_voxels': g['n_active_voxels'],
         'n_total_voxels': g['n_total_voxels'],
         'elapsed_s': elapsed,
+        'ran': 'candidate' if candidate else 'editor',
     }
-    # Model sees the lean summary; the UI event also carries the mesh so the
-    # viewer updates without a second (blocking) refetch.
+    # Candidate (background) runs do NOT touch the user's viewer — return an
+    # empty ui event so nothing is rendered. Editor runs update the viewer,
+    # carrying the mesh so it refreshes without a second (blocking) refetch.
+    if candidate:
+        return ({'ok': True, **summary}, {})
     ui = {'kind': 'geometry_done', **summary,
           'n_vertices': g['n_vertices'], 'n_triangles': g['n_triangles'],
           'vertices_b64': g['vertices_b64'], 'triangles_b64': g['triangles_b64']}
@@ -191,15 +215,19 @@ async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dic
     k = 1 if mode == 'current' else 8
     E = float(args.get('E', 1.0))
     nu = float(args.get('nu', 0.45))
-    compiled = program_cache.get_or_compile(state.code)
+    code = args.get('code') or state.code
+    candidate = bool(args.get('code')) and args['code'] != state.code
+    compiled = program_cache.get_or_compile(code)
     if compiled.error:
-        return ({'ok': False, 'error': compiled.error}, {})
+        return ({'ok': False, 'error': compiled.error,
+                 'ran': 'candidate' if candidate else 'editor'}, {})
     from .kernel_job import run_sim_result
     t0 = time.perf_counter()
     try:
-        s = await run_sim_result(state.code, resolution, k, backend, E, nu)
+        s = await run_sim_result(code, resolution, k, backend, E, nu)
     except Exception as e:  # noqa: BLE001
-        return ({'ok': False, 'error': str(e)}, {})
+        return ({'ok': False, 'error': str(e),
+                 'ran': 'candidate' if candidate else 'editor'}, {})
     elapsed = time.perf_counter() - t0
     summary = {
         'code_hash': compiled.code_hash,
@@ -209,7 +237,11 @@ async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dic
         'C_matrix': s['C_matrix'],
         'properties': s['properties'],
         'elapsed_s': elapsed,
+        'ran': 'candidate' if candidate else 'editor',
     }
+    # Background candidate sims don't overwrite the user's results panel.
+    if candidate:
+        return ({'ok': True, **summary}, {})
     return ({'ok': True, **summary}, {'kind': 'sim_done', **summary})
 
 
@@ -238,6 +270,17 @@ do not paste code into chat. When a user asks "what does this do" or
 Use `run_geometry` and `run_simulation` when the user asks you to test
 something or when you need data to answer accurately. Don't run sims
 unprompted on every turn — they cost real GPU time.
+
+You can test your OWN ideas before proposing them: pass a candidate
+`make_structure()` program as the `code` argument to `run_geometry` /
+`run_simulation`. That runs your candidate privately, in the background,
+WITHOUT changing the user's editor or 3D viewer — so you can draft a
+variant, measure it (volume fraction, moduli), iterate, and only then
+`propose_edit` the version you're confident in. Omit `code` to run the
+user's current editor program (this DOES update their viewer). The tool
+result's `ran` field ("candidate" vs "editor") tells you which program was
+actually evaluated — check it so you never confuse a background test with
+the user's live code.
 
 Resolution guidance: 33 is a fast smoke (sub-second sim on GPU); 65 is
 a typical working res; 97 is high-fidelity but takes minutes for dense
