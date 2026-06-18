@@ -10,3 +10,7 @@ backend/studio_backend/_frontend_dist/
 **/__pycache__/
 **/*.pyc
 .DS_Store
+
+# session storage if ever pointed inside the checkout
+studio-sessions/
+sessions/

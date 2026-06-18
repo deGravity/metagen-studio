@@ -1,0 +1,29 @@
+# metagen-studio default configuration (checked in).
+#
+# Override precedence (lowest → highest):
+#   1. this file (metagen-studio/config.yaml)
+#   2. ~/.config/metagen.yaml
+#   3. ~/.metagenconfig.yaml
+#   4. environment variables (METAGEN_STUDIO_*, see studio_backend/config.py)
+#
+# Files are deep-merged; only the keys you set need to appear in an override.
+
+sessions:
+  enabled: true
+  # Where session logs / state / blobs are stored. '~' is expanded.
+  # Override on a given machine via ~/.config/metagen.yaml or
+  # the METAGEN_STUDIO_SESSION_DIR env var.
+  dir: ~/.metagen-studio/sessions
+
+copilot:
+  # Extended thinking (chain-of-thought). Toggleable from the UI per request;
+  # this sets the default and the token budget.
+  thinking:
+    enabled: true
+    budget_tokens: 4000
+  # Out-of-band session auto-naming (small model summarizes the chat).
+  autoname:
+    enabled: true
+    model: claude-haiku-4-5-20251001
+    every_turns: 5
+    idle_seconds: 60

@@ -224,21 +224,24 @@ and the explorer keeps showing all branches.
 No rebasing/merging in v1 — only branch + navigate. The model prompt for a
 continuation is always the root→HEAD path.
 
-## 10. Open decisions (need your call)
+## 10. Decisions (resolved 2026-06-18)
 
-1. **Extended thinking**: enable it (so there's real CoT to log)? It adds
-   latency + token cost. Options: always on (budget ~2–4k), a UI toggle, or
-   off (then "CoT" = just the raw text/tool reasoning, no hidden thinking).
-   *Recommend: a toggle, default on with a modest budget.*
-2. **Mesh persistence**: store meshes in blobs (instant restore, more disk) vs
-   regenerate from code on restore (slower, ~0 disk). *Recommend: store,
-   content-addressed + gz + optional GC.*
-3. **Session store location / multi-user**: this is single-user dev tooling;
-   `~/.metagen-studio/sessions` ok? Any need to colocate with the repo or a
-   project dir?
-4. **Granularity of nodes**: every action a node (proposed) vs only chat turns
-   as nodes with runs attached. *Recommend: every action = node.*
-5. **Retention**: keep everything forever, or cap (e.g. last N sessions / size)?
+1. **Extended thinking** — ENABLE as a **UI toggle** (default on, modest
+   budget). Thinking blocks are logged in `copilot_response.content_blocks`.
+2. **Mesh persistence** — STORE meshes in blobs (content-addressed + gz).
+   Revisit if disk gets out of hand.
+3. **Config + storage location** — driven by a layered config:
+   - packaged default `metagen-studio/config.yaml` (checked in),
+   - overridden by `~/.config/metagen.yaml`, then `~/.metagenconfig.yaml`,
+   - then env vars (`METAGEN_STUDIO_SESSION_DIR`, etc.).
+   Default `sessions.dir = ~/.metagen-studio/sessions`. **On this machine**:
+   `~/.config/metagen.yaml` sets it to `/ssd/benjones/metagen-dev/studio-sessions`.
+   Session dirs are **gitignored** (metagen-dev repo + metagen-studio).
+4. **Node granularity** — every action is a node. May add compaction later.
+5. **Retention** — keep everything forever. Provide a **cleanup view/modal**
+   showing per-session size + total, with: delete a session; delete everything
+   off the current branch within a session; delete this session + all older
+   (by last-use timestamp). No automatic GC.
 
 ## 11. Phased implementation plan
 
