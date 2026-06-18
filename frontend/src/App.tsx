@@ -4,7 +4,7 @@ import { Viewer3D } from './components/Viewer3D';
 import { SettingsPanel } from './components/Settings';
 import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
-import { executeCode, simulate, getInfo, decodeMesh, streamExecute, cancelJob } from './api';
+import { simulate, getInfo, decodeMesh, streamExecute, cancelJob } from './api';
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
   TpmsMode, SimBackend, MeshData, ChatStateContext,
@@ -115,17 +115,31 @@ export default function App() {
     // tag will surface that. Don't auto-rerun.
   }
 
-  // Refetch fresh mesh when chat triggers run_geometry on the server.
-  async function chatGeometryDone(summary: any) {
-    try {
-      const r = await executeCode(code, summary.resolution, summary.tpms_optimizer_mode ?? 'current');
-      setGeometry(r);
-      setMesh(decodeMesh(r));
-      setResolution(summary.resolution);
-      if (summary.tpms_optimizer_mode) setTpmsMode(summary.tpms_optimizer_mode);
-    } catch (e: any) {
-      setError(`refresh after chat run_geometry: ${e.message}`);
-    }
+  // Chat's run_geometry tool now returns the mesh in its UI event, so update
+  // the viewer directly — no second (blocking) refetch.
+  function chatGeometryDone(summary: any) {
+    setResolution(summary.resolution);
+    if (summary.tpms_optimizer_mode) setTpmsMode(summary.tpms_optimizer_mode);
+    if (!summary.vertices_b64 || !summary.triangles_b64) return;
+    const r: ExecuteResponse = {
+      code_hash: summary.code_hash,
+      resolution: summary.resolution,
+      tpms_optimizer_mode: summary.tpms_optimizer_mode ?? 'current',
+      stats: {
+        cell_resolution: summary.cell_resolution,
+        volume_fraction: summary.volume_fraction,
+        n_vertices: summary.n_vertices,
+        n_triangles: summary.n_triangles,
+        n_active_voxels: summary.n_active_voxels,
+        n_total_voxels: summary.n_total_voxels,
+      },
+      vertices_b64: summary.vertices_b64,
+      triangles_b64: summary.triangles_b64,
+      elapsed_geometry_s: summary.elapsed_s ?? 0,
+      cached: false,
+    };
+    setGeometry(r);
+    setMesh(decodeMesh(r));
   }
 
   function chatSimDone(summary: any) {

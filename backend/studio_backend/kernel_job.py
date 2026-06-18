@@ -253,6 +253,77 @@ def _cleanup(path: str):
 
 
 # --------------------------------------------------------------------------- #
+# non-streaming runners (used by the copilot tools so they don't block the
+# event loop — same subprocess, just run to completion and return the result)
+# --------------------------------------------------------------------------- #
+async def _run_worker(payload: dict, result_path: str):
+    """Spawn the worker, feed it `payload`, await completion. Raises
+    RuntimeError on a compile/run failure or nonzero exit."""
+    cmd = ['stdbuf', '-oL', '-eL', sys.executable, '-u',
+           '-m', 'studio_backend.kernel_job', '--worker', result_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=_BACKEND_DIR,
+        preexec_fn=_set_pdeathsig,
+    )
+    job = Job(id=uuid.uuid4().hex[:12], proc=proc, started=time.time())
+    JOBS.add(job)
+    try:
+        out, _ = await proc.communicate(json.dumps(payload).encode('utf-8'))
+    finally:
+        if proc.returncode is None:
+            _kill_proc(proc)
+        JOBS.remove(job.id)
+    text = out.decode('utf-8', 'replace')
+    for ln in text.splitlines():
+        if ln.startswith('STUDIO_ERROR '):
+            raise RuntimeError(base64.b64decode(
+                ln[len('STUDIO_ERROR '):]).decode('utf-8', 'replace'))
+    if proc.returncode != 0:
+        raise RuntimeError(f'kernel worker exited {proc.returncode}: {text[-400:]}')
+
+
+async def run_geometry_result(code: str, resolution: int, multistart_k: int) -> dict:
+    fd, rp = tempfile.mkstemp(suffix='.npz', prefix='studio_geo_')
+    os.close(fd)
+    try:
+        await _run_worker({'mode': 'geometry', 'code': code,
+                           'resolution': resolution, 'multistart_k': multistart_k}, rp)
+        d = np.load(rp)
+        verts = np.ascontiguousarray(d['verts'], np.float32)
+        tris = np.ascontiguousarray(d['tris'], np.uint32)
+        return {
+            'cell_resolution': int(d['cell_resolution']),
+            'volume_fraction': float(d['volume_fraction']),
+            'n_active_voxels': int(d['n_active']),
+            'n_total_voxels': int(d['n_total']),
+            'n_vertices': int(verts.shape[0]) if verts.ndim == 2 else 0,
+            'n_triangles': int(tris.shape[0]) if tris.ndim == 2 else 0,
+            'vertices_b64': base64.b64encode(verts.tobytes()).decode('ascii'),
+            'triangles_b64': base64.b64encode(tris.tobytes()).decode('ascii'),
+        }
+    finally:
+        _cleanup(rp)
+
+
+async def run_sim_result(code: str, resolution: int, multistart_k: int,
+                         backend: str, E: float, nu: float) -> dict:
+    fd, rp = tempfile.mkstemp(suffix='.json', prefix='studio_sim_')
+    os.close(fd)
+    try:
+        await _run_worker({'mode': 'simulate', 'code': code,
+                           'resolution': resolution, 'multistart_k': multistart_k,
+                           'backend': backend, 'E': E, 'nu': nu}, rp)
+        with open(rp) as f:
+            return json.load(f)  # {C_matrix, properties, solver_used}
+    finally:
+        _cleanup(rp)
+
+
+# --------------------------------------------------------------------------- #
 # worker side: one geometry generation, mesh + stats to npz
 # --------------------------------------------------------------------------- #
 def _worker_main(result_path: str) -> int:
@@ -269,41 +340,59 @@ def _worker_main(result_path: str) -> int:
                 sys.path.insert(0, p)
 
     payload = json.loads(sys.stdin.read())
+    mode = payload.get('mode', 'geometry')
     code = payload['code']
     resolution = int(payload['resolution'])
     multistart_k = int(payload['multistart_k'])
 
+    def _emit_error(msg: str) -> None:
+        sys.stdout.write('STUDIO_ERROR ' + base64.b64encode(
+            msg.encode('utf-8')).decode('ascii') + '\n')
+        sys.stdout.flush()
+
     from studio_backend.execute import _compile, hash_code
     compiled = _compile(code, hash_code(code))
     if compiled.error:
-        sys.stdout.write('STUDIO_ERROR ' + base64.b64encode(
-            compiled.error.encode('utf-8')).decode('ascii') + '\n')
-        sys.stdout.flush()
+        _emit_error(compiled.error)
         return 3
 
+    import traceback
     try:
-        geo = compiled.structure.geometry(
-            resolution=resolution, tpms_multistart_k=multistart_k)
+        if mode == 'simulate':
+            backend = payload.get('backend', 'auto')
+            E = float(payload.get('E', 1.0))
+            nu = float(payload.get('nu', 0.45))
+            # prime geometry at the requested multistart_k, then simulate
+            compiled.structure.geometry(
+                resolution=resolution, tpms_multistart_k=multistart_k)
+            sim = compiled.structure.simulate(
+                resolution=resolution, backend=backend, E=E, nu=nu)
+            with open(result_path, 'w') as f:
+                json.dump({
+                    'C_matrix': np.asarray(sim.C_matrix, dtype=float).tolist(),
+                    'properties': {k: float(v) for k, v in sim.properties.items()},
+                    'solver_used': str(sim.solver_used),
+                }, f)
+        else:
+            geo = compiled.structure.geometry(
+                resolution=resolution, tpms_multistart_k=multistart_k)
+            tv = np.asarray(geo.thickened_vertices)
+            tt = np.asarray(geo.thickened_triangles)
+            if not (tv.size and tt.size):
+                tv = np.asarray(geo.voxel_surface_vertices)
+                tt = np.asarray(geo.voxel_surface_triangles)
+            vox = np.asarray(geo.voxel_active_cells)
+            np.savez(result_path,
+                     verts=np.ascontiguousarray(tv, np.float32),
+                     tris=np.ascontiguousarray(tt, np.uint32),
+                     cell_resolution=int(geo.cell_resolution),
+                     volume_fraction=float(geo.volume_fraction),
+                     n_active=int(vox.sum()),
+                     n_total=int(vox.size))
     except Exception:  # noqa: BLE001
-        import traceback
-        sys.stdout.write('STUDIO_ERROR ' + base64.b64encode(
-            traceback.format_exc().encode('utf-8')).decode('ascii') + '\n')
-        sys.stdout.flush()
+        _emit_error(traceback.format_exc())
         return 4
 
-    tv = np.asarray(geo.thickened_vertices)
-    tt = np.asarray(geo.thickened_triangles)
-    if not (tv.size and tt.size):
-        tv = np.asarray(geo.voxel_surface_vertices)
-        tt = np.asarray(geo.voxel_surface_triangles)
-    vox = np.asarray(geo.voxel_active_cells)
-    np.savez(result_path,
-             verts=np.ascontiguousarray(tv, np.float32),
-             tris=np.ascontiguousarray(tt, np.uint32),
-             cell_resolution=int(geo.cell_resolution),
-             volume_fraction=float(geo.volume_fraction),
-             n_active=int(vox.sum()),
-             n_total=int(vox.size))
     sys.stdout.write('STUDIO_RESULT_READY\n')
     sys.stdout.flush()
     return 0

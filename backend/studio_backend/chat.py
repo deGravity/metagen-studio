@@ -150,49 +150,64 @@ def _geometry_summary(geo, code_hash: str, resolution: int, mode: str) -> dict:
 async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict, dict]:
     resolution = int(args.get('resolution', 33))
     mode = args.get('tpms_optimizer_mode', 'current')
+    k = 1 if mode == 'current' else 8
     compiled = program_cache.get_or_compile(state.code)
     if compiled.error:
         return ({'ok': False, 'error': compiled.error}, {})
+    # Run the kernel in a subprocess so the chat SSE stream (on the event
+    # loop) keeps flowing — an in-process solve holds the GIL and would drop
+    # the chat connection ("network error").
+    from .kernel_job import run_geometry_result
     t0 = time.perf_counter()
-    geo = await asyncio.to_thread(
-        compiled.structure.geometry,
-        resolution=resolution, tpms_multistart_k=(1 if mode == 'current' else 8))
+    try:
+        g = await run_geometry_result(state.code, resolution, k)
+    except Exception as e:  # noqa: BLE001
+        return ({'ok': False, 'error': str(e)}, {})
     elapsed = time.perf_counter() - t0
-    summary = _geometry_summary(geo, compiled.code_hash, resolution, mode)
-    summary['elapsed_s'] = elapsed
-    return (
-        {'ok': True, **summary},
-        {'kind': 'geometry_done', **summary},
-    )
+    summary = {
+        'code_hash': compiled.code_hash,
+        'resolution': resolution,
+        'cell_resolution': g['cell_resolution'],
+        'tpms_optimizer_mode': mode,
+        'volume_fraction': g['volume_fraction'],
+        'fill_fraction': (g['n_active_voxels'] / g['n_total_voxels']
+                          if g['n_total_voxels'] else 0.0),
+        'n_active_voxels': g['n_active_voxels'],
+        'n_total_voxels': g['n_total_voxels'],
+        'elapsed_s': elapsed,
+    }
+    # Model sees the lean summary; the UI event also carries the mesh so the
+    # viewer updates without a second (blocking) refetch.
+    ui = {'kind': 'geometry_done', **summary,
+          'n_vertices': g['n_vertices'], 'n_triangles': g['n_triangles'],
+          'vertices_b64': g['vertices_b64'], 'triangles_b64': g['triangles_b64']}
+    return ({'ok': True, **summary}, ui)
 
 
 async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dict, dict]:
     resolution = int(args.get('resolution', 33))
     backend = args.get('backend', 'auto')
     mode = args.get('tpms_optimizer_mode', 'current')
+    k = 1 if mode == 'current' else 8
     E = float(args.get('E', 1.0))
     nu = float(args.get('nu', 0.45))
     compiled = program_cache.get_or_compile(state.code)
     if compiled.error:
         return ({'ok': False, 'error': compiled.error}, {})
-    # Prime geometry cache with the right mode first.
-    await asyncio.to_thread(
-        compiled.structure.geometry,
-        resolution=resolution, tpms_multistart_k=(1 if mode == 'current' else 8))
+    from .kernel_job import run_sim_result
     t0 = time.perf_counter()
-    sim = await asyncio.to_thread(
-        compiled.structure.simulate,
-        resolution=resolution, backend=backend, E=E, nu=nu)
+    try:
+        s = await run_sim_result(state.code, resolution, k, backend, E, nu)
+    except Exception as e:  # noqa: BLE001
+        return ({'ok': False, 'error': str(e)}, {})
     elapsed = time.perf_counter() - t0
-    C = np.asarray(sim.C_matrix, dtype=float).tolist()
-    properties = {k: float(v) for k, v in sim.properties.items()}
     summary = {
         'code_hash': compiled.code_hash,
         'resolution': resolution,
         'tpms_optimizer_mode': mode,
-        'backend_used': str(sim.solver_used),
-        'C_matrix': C,
-        'properties': properties,
+        'backend_used': s['solver_used'],
+        'C_matrix': s['C_matrix'],
+        'properties': s['properties'],
         'elapsed_s': elapsed,
     }
     return ({'ok': True, **summary}, {'kind': 'sim_done', **summary})
