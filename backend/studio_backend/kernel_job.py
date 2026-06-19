@@ -134,7 +134,8 @@ JOBS = JobRegistry()
 
 
 async def stream_geometry(code: str, resolution: int, multistart_k: int,
-                          tpms_optimizer_mode: str, code_hash: str):
+                          tpms_optimizer_mode: str, code_hash: str,
+                          session_id: str = None):
     """Async-generator of SSE byte chunks for one geometry job.
 
     Event sequence: job → progress* → (result | error | cancelled) → done.
@@ -239,6 +240,25 @@ async def stream_geometry(code: str, resolution: int, multistart_k: int,
         }
         from . import results_cache
         results_cache.put_geometry(code_hash, {**result, 'cached': True})
+        if session_id:
+            try:
+                from . import sessions as _sess
+                e1 = _sess.append_event(session_id, 'editor_snapshot',
+                                        {'code': code, 'code_hash': code_hash, 'reason': 'run'})
+                e2 = _sess.append_event(session_id, 'geometry_run', {
+                    'code_hash': code_hash, 'resolution': resolution,
+                    'tpms_mode': tpms_optimizer_mode, 'multistart_k': multistart_k,
+                    'origin': 'button', 'stats': result['stats'],
+                    'elapsed_s': result['elapsed_geometry_s']})
+                ref = _sess.put_blob(session_id, {**result, 'cached': True})
+                vf = result['stats']['volume_fraction']
+                _sess.add_node(session_id, 'geometry',
+                               f"ran geometry @{resolution} · vf {vf:.3f}",
+                               {'code': code, 'code_hash': code_hash,
+                                'geometry_ref': ref, 'sim_ref': None, 'chat_len': 0},
+                               event_ids=[e1['id'], e2['id']])
+            except Exception:  # noqa: BLE001
+                pass
         yield _sse('result', result)
     except Exception as e:  # noqa: BLE001
         yield _sse('error', {'message': f'failed to read kernel result: {e}'})

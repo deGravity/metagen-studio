@@ -31,6 +31,39 @@ from metagen_dsl.docs import render_llm as _render_dsl_docs
 
 from .models import ChatRequest, ChatStateContext
 from .state import program_cache
+from .config import cfg
+from . import sessions as _sess
+
+
+def _turn_label(req: ChatRequest) -> str:
+    last_user = next((m for m in reversed(req.messages) if m.role == 'user'), None)
+    txt = ''
+    if last_user is not None:
+        c = last_user.content
+        if isinstance(c, str):
+            txt = c
+        elif isinstance(c, list):
+            txt = ' '.join(b.get('text', '') for b in c
+                           if isinstance(b, dict) and b.get('type') == 'text')
+    txt = (txt or '').strip().replace('\n', ' ')
+    return ('copilot: ' + txt[:60]) if txt else 'chat turn'
+
+
+def _compact_ui_for_log(sid, ui: dict) -> dict:
+    """Spill mesh b64 to a dedup'd blob so events.jsonl stays lean."""
+    if not ui or not ('vertices_b64' in ui or 'triangles_b64' in ui):
+        return ui
+    u = dict(ui)
+    if sid:
+        try:
+            u['mesh_ref'] = _sess.put_blob(sid, {
+                'vertices_b64': u.get('vertices_b64'),
+                'triangles_b64': u.get('triangles_b64')})
+        except Exception:  # noqa: BLE001
+            pass
+    u.pop('vertices_b64', None)
+    u.pop('triangles_b64', None)
+    return u
 
 
 router = APIRouter()
@@ -397,64 +430,123 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
 
     client = AsyncAnthropic(api_key=api_key)
     system = _system_blocks(req.state)
+    sid = req.session_id
 
-    # Model expects content as list[dict] for assistant turns, but plain
-    # str works for user messages — normalize.
-    api_messages: list[dict] = []
-    for m in req.messages:
-        if isinstance(m.content, str):
-            api_messages.append({'role': m.role, 'content': m.content})
-        else:
-            api_messages.append({'role': m.role, 'content': m.content})
+    # --- session logging helpers (no-ops when no session) ---
+    turn_event_ids: list[str] = []
+
+    def log(etype, payload):
+        if not sid:
+            return
+        try:
+            turn_event_ids.append(_sess.append_event(sid, etype, payload)['id'])
+        except Exception:  # noqa: BLE001 — logging must never break the chat
+            pass
+
+    def finalize_node():
+        if not sid or not turn_event_ids:
+            return
+        try:
+            code = req.state.code
+            _sess.add_node(sid, 'assistant_turn', _turn_label(req),
+                           {'code': code,
+                            'code_hash': _hash12(code) if code else None,
+                            'geometry_ref': None, 'sim_ref': None,
+                            'chat_len': len(req.messages)},
+                           event_ids=list(turn_event_ids))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- extended thinking config (per-request override > config default) ---
+    want_think = (req.thinking if req.thinking is not None
+                  else bool(cfg('copilot.thinking.enabled', True)))
+    budget = int(cfg('copilot.thinking.budget_tokens', 4000))
+    max_tokens = req.max_tokens
+    thinking_param = None
+    if want_think:
+        if max_tokens <= budget:
+            max_tokens = budget + 4096  # response budget must exceed thinking budget
+        thinking_param = {'type': 'enabled', 'budget_tokens': budget}
+
+    api_messages: list[dict] = [{'role': m.role, 'content': m.content}
+                                for m in req.messages]
+
+    if sid:
+        last_user = next((m for m in reversed(req.messages) if m.role == 'user'), None)
+        if last_user is not None:
+            log('user_message', {'content': last_user.content})
 
     MAX_TURNS = 8
-    for turn in range(MAX_TURNS):
+    for call_index in range(MAX_TURNS):
         try:
-            async with client.messages.stream(
-                model=req.model, max_tokens=req.max_tokens,
+            log('copilot_request', {
+                'call_index': call_index, 'model': req.model,
+                'max_tokens': max_tokens, 'thinking': thinking_param,
+                'system': [b.get('text', '') for b in system],
+                'messages': api_messages,
+                'tools': [t['name'] for t in TOOLS]})
+
+            stream_kwargs = dict(
+                model=req.model, max_tokens=max_tokens,
                 messages=api_messages, system=system, tools=TOOLS,
-                extra_headers={'anthropic-beta': 'files-api-2025-04-14'},
-            ) as stream:
-                # Track in-flight content blocks so we can reconstruct
-                # the final assistant message for the next turn.
+                extra_headers={'anthropic-beta': 'files-api-2025-04-14'})
+            if thinking_param:
+                stream_kwargs['thinking'] = thinking_param
+
+            async with client.messages.stream(**stream_kwargs) as stream:
                 async for event in stream:
                     et = getattr(event, 'type', None)
                     if et == 'text':
                         yield _sse('text', {'text': event.text})
+                    elif et == 'thinking':
+                        yield _sse('thinking', {'text': getattr(event, 'thinking', '')})
                     elif et == 'content_block_start':
                         block = event.content_block
                         if block.type == 'tool_use':
-                            yield _sse('tool_call_start', {
-                                'id': block.id, 'name': block.name,
-                            })
-                    elif et == 'message_stop':
-                        pass
-
+                            yield _sse('tool_call_start',
+                                       {'id': block.id, 'name': block.name})
                 final = await stream.get_final_message()
 
-            # Append the assistant turn to history.
-            assistant_blocks: list[dict] = []
+            # Reconstruct full assistant content for the API (thinking blocks
+            # must be carried through tool round-trips); display strips thinking.
+            api_blocks: list[dict] = []
+            display_blocks: list[dict] = []
             tool_uses: list[tuple[str, str, dict]] = []
             for block in final.content:
-                if block.type == 'text':
-                    assistant_blocks.append({'type': 'text', 'text': block.text})
-                elif block.type == 'tool_use':
-                    assistant_blocks.append({
-                        'type': 'tool_use', 'id': block.id,
-                        'name': block.name, 'input': block.input,
-                    })
+                bt = block.type
+                if bt == 'text':
+                    blk = {'type': 'text', 'text': block.text}
+                    api_blocks.append(blk); display_blocks.append(blk)
+                elif bt == 'thinking':
+                    api_blocks.append({'type': 'thinking', 'thinking': block.thinking,
+                                       'signature': getattr(block, 'signature', None)})
+                elif bt == 'redacted_thinking':
+                    api_blocks.append({'type': 'redacted_thinking',
+                                       'data': getattr(block, 'data', '')})
+                elif bt == 'tool_use':
+                    blk = {'type': 'tool_use', 'id': block.id,
+                           'name': block.name, 'input': block.input}
+                    api_blocks.append(blk); display_blocks.append(blk)
                     tool_uses.append((block.id, block.name, block.input))
-            api_messages.append({'role': 'assistant', 'content': assistant_blocks})
-            yield _sse('assistant_msg', {'content': assistant_blocks})
+            api_messages.append({'role': 'assistant', 'content': api_blocks})
+
+            usage = getattr(final, 'usage', None)
+            log('copilot_response', {
+                'call_index': call_index, 'stop_reason': final.stop_reason,
+                'usage': ({'input_tokens': getattr(usage, 'input_tokens', None),
+                           'output_tokens': getattr(usage, 'output_tokens', None)}
+                          if usage else None),
+                'content_blocks': api_blocks})
+            yield _sse('assistant_msg', {'content': display_blocks})
 
             if final.stop_reason != 'tool_use' or not tool_uses:
                 yield _sse('done', {'stop_reason': final.stop_reason})
+                finalize_node()
                 return
 
-            # Execute each tool call, emit UI events, and gather results
-            # to feed back to the model.
             tool_result_blocks: list[dict] = []
             for tool_id, name, args in tool_uses:
+                t0 = time.perf_counter()
                 handler = _TOOL_DISPATCH.get(name)
                 if handler is None:
                     result = {'error': f'unknown tool: {name}'}
@@ -474,6 +566,14 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
                 yield _sse('tool_result', {
                     'tool_id': tool_id, 'name': name, 'result': result,
                 })
+                if name == 'propose_edit':
+                    log('proposal', {'tool_id': tool_id,
+                                     'new_code': args.get('new_code', ''),
+                                     'summary': args.get('summary', '')})
+                log('tool_exec', {
+                    'tool_id': tool_id, 'name': name, 'args': args,
+                    'result': result, 'ui': _compact_ui_for_log(sid, ui),
+                    'elapsed_s': round(time.perf_counter() - t0, 3)})
                 tool_result_blocks.append({
                     'type': 'tool_result', 'tool_use_id': tool_id,
                     'content': json.dumps(result),
@@ -486,9 +586,12 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
                 'message': f'{type(exc).__name__}: {exc}',
                 'traceback': traceback.format_exc(),
             })
+            log('error', {'message': f'{type(exc).__name__}: {exc}'})
+            finalize_node()
             return
 
     yield _sse('error', {'message': f'tool-use loop exceeded {MAX_TURNS} turns'})
+    finalize_node()
 
 
 @router.post('/api/chat')

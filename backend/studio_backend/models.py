@@ -10,6 +10,7 @@ class ExecuteRequest(BaseModel):
     code: str
     resolution: int = Field(default=33, ge=8, le=256)
     tpms_optimizer_mode: TpmsMode = 'current'
+    session_id: Optional[str] = None   # log to this session if set
 
 
 class GeometryStats(BaseModel):
@@ -39,6 +40,7 @@ class SimulateRequest(BaseModel):
     backend: SimBackend = 'auto'
     E: float = 1.0
     nu: float = 0.45
+    session_id: Optional[str] = None   # log to this session if set
 
 
 class SimulateResponse(BaseModel):
@@ -95,3 +97,30 @@ class ChatRequest(BaseModel):
     state: ChatStateContext
     model: str = 'claude-opus-4-7'
     max_tokens: int = 4096
+    session_id: Optional[str] = None       # log to this session if set
+    thinking: Optional[bool] = None        # None = use config default
+
+
+# --- sessions -----------------------------------------------------------
+
+class SessionCreate(BaseModel):
+    name: Optional[str] = None
+    model: Optional[str] = None
+
+
+class SessionRename(BaseModel):
+    name: str
+
+
+class CheckoutRequest(BaseModel):
+    node_id: str
+
+
+class SessionEventRequest(BaseModel):
+    """Frontend-driven event/node (e.g. proposal accept/reject, edit)."""
+    type: str
+    payload: dict = {}
+    make_node: bool = False
+    kind: Optional[str] = None
+    label: Optional[str] = None
+    snapshot: Optional[dict] = None

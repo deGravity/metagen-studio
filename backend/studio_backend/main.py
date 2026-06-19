@@ -48,6 +48,11 @@ from .execute import hash_code  # noqa: E402
 from .chat import router as chat_router  # noqa: E402
 from .kernel_job import stream_geometry, JOBS  # noqa: E402
 from . import results_cache  # noqa: E402
+from . import sessions as _sessions  # noqa: E402
+from .config import cfg  # noqa: E402
+from .models import (  # noqa: E402
+    SessionCreate, SessionRename, CheckoutRequest, SessionEventRequest,
+)
 
 
 app = FastAPI(title="metaDSL Studio Backend")
@@ -158,7 +163,8 @@ async def execute_stream(req: ExecuteRequest):
     return StreamingResponse(
         stream_geometry(req.code, req.resolution,
                         _multistart_k(req.tpms_optimizer_mode),
-                        req.tpms_optimizer_mode, hash_code(req.code)),
+                        req.tpms_optimizer_mode, hash_code(req.code),
+                        session_id=req.session_id),
         media_type='text/event-stream',
         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
     )
@@ -208,10 +214,107 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
         cached=cached,
     )
     results_cache.put_sim(compiled.code_hash, {**resp.model_dump(), 'cached': True})
+    if req.session_id:
+        _log_sim_node(req.session_id, compiled.code_hash, req, resp, elapsed, origin='button')
     return resp
 
 
-@app.post('/api/results/cached')
+def _log_sim_node(sid, code_hash, req, resp, elapsed, origin):
+    """Append editor_snapshot + sim_run events and a sim node to a session."""
+    try:
+        e1 = _sessions.append_event(sid, 'editor_snapshot',
+                                    {'code': req.code, 'code_hash': code_hash, 'reason': 'sim'})
+        e2 = _sessions.append_event(sid, 'sim_run', {
+            'code_hash': code_hash, 'resolution': req.resolution,
+            'backend': resp.backend_used, 'E': req.E, 'nu': req.nu,
+            'origin': origin, 'C_matrix': resp.C_matrix,
+            'properties': resp.properties, 'elapsed_s': round(elapsed, 3)})
+        ref = _sessions.put_blob(sid, {**resp.model_dump(), 'cached': True})
+        _sessions.add_node(sid, 'sim',
+                           f"simulated @{req.resolution} · {resp.backend_used}",
+                           {'code': req.code, 'code_hash': code_hash,
+                            'geometry_ref': None, 'sim_ref': ref,
+                            'chat_len': 0},
+                           event_ids=[e1['id'], e2['id']])
+    except Exception:  # noqa: BLE001 — logging must never break the request
+        pass
+
+
+# --- sessions -------------------------------------------------------------
+@app.post('/api/sessions')
+def create_session(req: SessionCreate):
+    return _sessions.create_session(name=req.name, model=req.model)
+
+
+@app.get('/api/sessions')
+def list_sessions():
+    return {'sessions': _sessions.list_sessions()}
+
+
+@app.get('/api/sessions/{sid}')
+def get_session(sid: str):
+    tree = _sessions.get_tree(sid)
+    if tree is None:
+        raise HTTPException(status_code=404, detail='no such session')
+    return tree
+
+
+@app.patch('/api/sessions/{sid}')
+def rename_session(sid: str, req: SessionRename):
+    tree = _sessions.set_name(sid, req.name, 'user')
+    if tree is None:
+        raise HTTPException(status_code=404, detail='no such session')
+    return tree
+
+
+@app.delete('/api/sessions/{sid}')
+def delete_session(sid: str):
+    return {'ok': _sessions.delete_session(sid)}
+
+
+@app.get('/api/sessions/{sid}/events')
+def session_events(sid: str, node: str = None, types: str = None):
+    tset = set(types.split(',')) if types else None
+    return {'events': list(_sessions.read_events(sid, node_id=node, types=tset))}
+
+
+@app.get('/api/sessions/{sid}/node/{node_id}')
+def session_node(sid: str, node_id: str):
+    tree = _sessions.get_tree(sid)
+    if tree is None or node_id not in tree['nodes']:
+        raise HTTPException(status_code=404, detail='no such node')
+    node = tree['nodes'][node_id]
+    snap = dict(node['snapshot'])
+    # resolve referenced result blobs for an instant restore
+    snap['geometry'] = _sessions.get_blob(sid, snap['geometry_ref']) if snap.get('geometry_ref') else None
+    snap['sim'] = _sessions.get_blob(sid, snap['sim_ref']) if snap.get('sim_ref') else None
+    return {'node': node, 'snapshot': snap,
+            'events': list(_sessions.read_events(sid, node_id=node_id))}
+
+
+@app.post('/api/sessions/{sid}/checkout')
+def session_checkout(sid: str, req: CheckoutRequest):
+    node = _sessions.checkout(sid, req.node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail='no such node')
+    snap = dict(node['snapshot'])
+    snap['geometry'] = _sessions.get_blob(sid, snap['geometry_ref']) if snap.get('geometry_ref') else None
+    snap['sim'] = _sessions.get_blob(sid, snap['sim_ref']) if snap.get('sim_ref') else None
+    return {'node': node, 'snapshot': snap}
+
+
+@app.post('/api/sessions/{sid}/event')
+def session_event(sid: str, req: SessionEventRequest):
+    """Frontend-driven event (+ optional node), e.g. proposal accept/reject."""
+    ev = _sessions.append_event(sid, req.type, req.payload)
+    node = None
+    if req.make_node:
+        node = _sessions.add_node(sid, req.kind or req.type, req.label or req.type,
+                                  req.snapshot or {'code': None, 'code_hash': None,
+                                                   'geometry_ref': None, 'sim_ref': None,
+                                                   'chat_len': 0},
+                                  event_ids=[ev['id']])
+    return {'event': ev, 'node': node}
 def results_cached(req: CodeRequest):
     """Latest cached geometry/sim for a given program (by code hash), so an
     accepted proposal can reuse what the copilot already computed."""
