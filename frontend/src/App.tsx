@@ -4,11 +4,18 @@ import { Viewer3D } from './components/Viewer3D';
 import { SettingsPanel } from './components/Settings';
 import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
-import { simulate, getInfo, decodeMesh, streamExecute, cancelJob, getCachedResults } from './api';
+import { SessionBar } from './components/SessionBar';
+import {
+  simulate, getInfo, decodeMesh, streamExecute, cancelJob, getCachedResults,
+  createSession, listSessions, getSession, renameSession, getNode, logSessionEvent,
+} from './api';
+import type { SessionInfo, NodeRestore } from './api';
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
   TpmsMode, SimBackend, MeshData, ChatStateContext,
 } from './types';
+
+const LS_SESSION = 'studio.sessionId';
 
 const DEFAULT_CODE = `from metagen import *
 
@@ -57,6 +64,77 @@ export default function App() {
   >(null);
   const [chatHeight, setChatHeight] = useState(320);
   const jobIdRef = useRef<string | null>(null);
+  // sessions
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState('Untitled session');
+  const [sessionNameSource, setSessionNameSource] = useState('auto');
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [thinking, setThinking] = useState(true);
+
+  // Restore the editor/viewer/results from a session node snapshot.
+  function applyRestore(r: NodeRestore) {
+    const snap = r.snapshot;
+    if (snap.code != null) setCode(snap.code);
+    if (snap.geometry) { setGeometry(snap.geometry); setMesh(decodeMesh(snap.geometry)); setResolution(snap.geometry.resolution); }
+    else { setGeometry(null); setMesh(null); }
+    setSim(snap.sim ?? null);
+  }
+
+  async function adoptSession(tree: { session_id: string; name: string; name_source: string; head: string }) {
+    setSessionId(tree.session_id);
+    setSessionName(tree.name);
+    setSessionNameSource(tree.name_source);
+    localStorage.setItem(LS_SESSION, tree.session_id);
+    listSessions().then(setSessions).catch(() => {});
+  }
+
+  // init: resume stored session or create a new one (guard StrictMode double-run)
+  const sessionInitRef = useRef(false);
+  useEffect(() => {
+    if (sessionInitRef.current) return;
+    sessionInitRef.current = true;
+    (async () => {
+      const stored = localStorage.getItem(LS_SESSION);
+      if (stored) {
+        try {
+          const tree = await getSession(stored);
+          await adoptSession(tree);
+          // restore HEAD state if it carries a snapshot
+          const head = tree.nodes[tree.head];
+          if (head?.snapshot?.code != null) {
+            const r = await getNode(stored, tree.head);
+            applyRestore(r);
+          }
+          return;
+        } catch { /* stored session gone — fall through to create */ }
+      }
+      try { await adoptSession(await createSession('claude-opus-4-7')); } catch (e: any) { setError(`session init: ${e.message}`); }
+    })();
+  }, []);
+
+  async function newSession() {
+    try {
+      const tree = await createSession('claude-opus-4-7');
+      await adoptSession(tree);
+      setGeometry(null); setSim(null); setMesh(null);
+    } catch (e: any) { setError(`new session: ${e.message}`); }
+  }
+
+  async function pickSession(id: string) {
+    try {
+      const tree = await getSession(id);
+      await adoptSession(tree);
+      const head = tree.nodes[tree.head];
+      if (head?.snapshot?.code != null) applyRestore(await getNode(id, tree.head));
+      else { setGeometry(null); setSim(null); setMesh(null); }
+    } catch (e: any) { setError(`open session: ${e.message}`); }
+  }
+
+  async function doRename(name: string) {
+    if (!sessionId) return;
+    try { const t = await renameSession(sessionId, name); setSessionName(t.name); setSessionNameSource(t.name_source); listSessions().then(setSessions).catch(() => {}); }
+    catch (e: any) { setError(`rename: ${e.message}`); }
+  }
 
   // Drag the splitter between the editor and the chat dock to resize the chat.
   function startChatDrag(e: React.MouseEvent) {
@@ -89,7 +167,7 @@ export default function App() {
     setBusy(true); setError(null); setProgress({ phase: 'starting' });
     jobIdRef.current = null;
     try {
-      for await (const ev of streamExecute(code, resolution, tpmsMode)) {
+      for await (const ev of streamExecute(code, resolution, tpmsMode, undefined, sessionId ?? undefined)) {
         if (ev.kind === 'job') {
           jobIdRef.current = ev.job_id;
         } else if (ev.kind === 'progress') {
@@ -117,7 +195,7 @@ export default function App() {
   async function runSim() {
     setBusy(true); setError(null);
     try {
-      const r = await simulate(code, resolution, tpmsMode, simBackend);
+      const r = await simulate(code, resolution, tpmsMode, simBackend, 1.0, 0.45, sessionId ?? undefined);
       setSim(r);
     } catch (e: any) {
       setError(e.message ?? String(e));
@@ -126,8 +204,16 @@ export default function App() {
     }
   }
 
-  async function applyProposal(newCode: string) {
+  async function applyProposal(newCode: string, _proposalId?: string, summary?: string) {
     setCode(newCode);
+    if (sessionId) {
+      const h = await hashCode(newCode);
+      logSessionEvent(sessionId, 'proposal_decision',
+        { status: 'accepted', summary: summary ?? '', code_hash: h },
+        { kind: 'edit', label: `accepted: ${(summary ?? 'edit').slice(0, 50)}`,
+          snapshot: { code: newCode, code_hash: h, geometry_ref: null, sim_ref: null, chat_len: 0 } },
+      ).catch(() => {});
+    }
     // If the copilot already ran geometry/sim on this exact code, reuse those
     // results so the viewer and results panel jump straight to up-to-date
     // instead of showing stale data until a manual re-run.
@@ -214,6 +300,15 @@ export default function App() {
     <div className="app">
       <header>
         <h1>metaDSL Studio</h1>
+        <SessionBar
+          name={sessionName}
+          nameSource={sessionNameSource}
+          sessions={sessions}
+          currentId={sessionId}
+          onNew={newSession}
+          onPick={pickSession}
+          onRename={doRename}
+        />
         <div className="hash">code: <code>{currentHash || '…'}</code></div>
       </header>
       <div className="layout">
@@ -224,10 +319,19 @@ export default function App() {
           <div className="vsplit" onMouseDown={startChatDrag}
                title="drag to resize the copilot panel" />
           <div className="chat-dock" style={{ height: chatHeight }}>
-            <div className="chat-dock-title">Copilot</div>
+            <div className="chat-dock-title">
+              Copilot
+              <label className="think-toggle" title="extended thinking (chain-of-thought)">
+                <input type="checkbox" checked={thinking}
+                       onChange={(e) => setThinking(e.target.checked)} />
+                thinking
+              </label>
+            </div>
             <ChatPanel
               state={chatState}
               available={info?.chat_available ?? false}
+              sessionId={sessionId ?? undefined}
+              thinking={thinking}
               onApplyProposal={applyProposal}
               onGeometryDone={chatGeometryDone}
               onSimDone={chatSimDone}

@@ -622,3 +622,67 @@ code {
 }
 
 .attachment-remove:hover { color: #ddd; }
+
+/* --- sessions --- */
+.session-bar {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #bbb; position: relative;
+}
+.session-label { color: #777; }
+.session-name {
+  background: #1d1d1d; border: 1px solid #2c2c2c; color: #e0e0e0;
+  border-radius: 3px; padding: 3px 8px; cursor: pointer; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 6px; max-width: 320px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-name:hover { border-color: #4a90e2; }
+.session-name .auto-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px;
+  background: #333; color: #999; border-radius: 2px; padding: 0 4px;
+}
+.session-name .edit-pencil { color: #666; }
+.session-name-input {
+  background: #1d1d1d; border: 1px solid #4a90e2; color: #fff;
+  border-radius: 3px; padding: 3px 8px; font-size: 12px; min-width: 220px;
+}
+.session-menu { position: relative; }
+.session-toggle {
+  background: #1d1d1d; border: 1px solid #2c2c2c; color: #bbb;
+  border-radius: 3px; padding: 3px 8px; cursor: pointer;
+}
+.session-dropdown {
+  position: absolute; top: 110%; left: 0; z-index: 50; min-width: 280px;
+  max-height: 360px; overflow-y: auto; background: #161616;
+  border: 1px solid #333; border-radius: 4px; box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  display: flex; flex-direction: column;
+}
+.session-new {
+  text-align: left; background: #1b2533; color: #cfe0f5; border: none;
+  border-bottom: 1px solid #2a2a2a; padding: 8px 10px; cursor: pointer; font-size: 12px;
+}
+.session-item {
+  text-align: left; background: none; border: none; border-bottom: 1px solid #222;
+  padding: 7px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
+}
+.session-item:hover { background: #1e1e1e; }
+.session-item.active { background: #20303f; }
+.si-name { color: #e0e0e0; font-size: 12px; }
+.si-meta { color: #777; font-size: 10px; }
+
+.chat-dock-title { display: flex; align-items: center; justify-content: space-between; }
+.think-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; text-transform: none; letter-spacing: 0; color: #9ab;
+  cursor: pointer; font-weight: 400;
+}
+.think-toggle input { margin: 0; cursor: pointer; }
+
+.thinking-block {
+  margin: 4px 0; font-size: 11px; color: #8a93a0;
+  background: #15171b; border: 1px solid #24262b; border-radius: 4px; padding: 4px 8px;
+}
+.thinking-block summary { cursor: pointer; color: #7e8794; }
+.thinking-body {
+  margin-top: 6px; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px; color: #9098a4; max-height: 240px; overflow-y: auto;
+}

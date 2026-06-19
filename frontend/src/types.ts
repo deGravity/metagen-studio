@@ -100,6 +100,7 @@ export interface PendingProposal {
 
 export type ChatEvent =
   | { kind: 'text'; text: string }
+  | { kind: 'thinking'; text: string }
   | { kind: 'tool_call_start'; id: string; name: string }
   | { kind: 'tool_ui'; tool_id: string; name: string; payload: any }
   | { kind: 'tool_result'; tool_id: string; name: string; result: any }

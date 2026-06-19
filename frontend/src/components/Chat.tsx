@@ -10,6 +10,8 @@ import type {
 interface Props {
   state: ChatStateContext;
   available: boolean;
+  sessionId?: string;
+  thinking?: boolean;
   onApplyProposal: (newCode: string, proposalId: string, summary: string) => void;
   onGeometryDone: (summary: any) => void;
   onSimDone: (summary: any) => void;
@@ -23,6 +25,7 @@ interface ChatTurn {
   attachments?: Attachment[];       // for user (uploaded files)
   proposals?: PendingProposal[];    // proposals attached to this assistant turn
   toolResults?: { tool_id: string; name: string; result: any }[];
+  thinking?: string;                // accumulated extended-thinking text
   streaming?: boolean;
 }
 
@@ -229,8 +232,18 @@ export function ChatPanel(props: Props) {
         { role: 'user', content: buildUserContent(text, atts) },
       ];
       let liveText = '';
-      for await (const ev of streamChat(apiMessages, props.state, ctl.signal)) {
-        if (ev.kind === 'text') {
+      let liveThinking = '';
+      for await (const ev of streamChat(apiMessages, props.state, ctl.signal,
+          'claude-opus-4-7', { thinking: props.thinking, session_id: props.sessionId })) {
+        if (ev.kind === 'thinking') {
+          liveThinking += ev.text;
+          setTurns((t) => {
+            const next = [...t];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') next[next.length - 1] = { ...last, thinking: liveThinking };
+            return next;
+          });
+        } else if (ev.kind === 'text') {
           liveText += ev.text;
           setTurns((t) => {
             const next = [...t];
@@ -494,6 +507,12 @@ function Turn({ turn, onApply, onDiscard }: TurnProps) {
   return (
     <div className="msg msg-assistant">
       <div className="msg-role">copilot {turn.streaming && <span className="streaming">…</span>}</div>
+      {turn.thinking && (
+        <details className="thinking-block">
+          <summary>💭 thinking</summary>
+          <div className="thinking-body">{turn.thinking}</div>
+        </details>
+      )}
       {(turn.blocks ?? []).map((b, i) => {
         if (b.type === 'text') {
           return (

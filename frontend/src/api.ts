@@ -25,6 +25,73 @@ export async function getInfo(): Promise<InfoResponse> {
   return r.json();
 }
 
+async function getJson<T>(path: string): Promise<T> {
+  const r = await fetch(`${API}${path}`);
+  if (!r.ok) throw new Error(`GET ${path} failed: ${r.status}`);
+  return r.json();
+}
+
+// --- sessions -----------------------------------------------------------
+
+export interface SessionInfo {
+  id: string; name: string; name_source: string;
+  created: string; updated: string; n_nodes: number;
+}
+export interface SessionNode {
+  id: string; parent: string | null; children: string[]; ts: string;
+  kind: string; label: string; event_ids: string[];
+  snapshot: { code: string | null; code_hash: string | null;
+              geometry_ref: string | null; sim_ref: string | null; chat_len: number };
+}
+export interface SessionTree {
+  session_id: string; name: string; name_source: string;
+  created: string; updated: string; head: string; model?: string;
+  nodes: Record<string, SessionNode>;
+}
+export interface NodeRestore {
+  node: SessionNode;
+  snapshot: SessionNode['snapshot'] & {
+    geometry?: ExecuteResponse | null; sim?: SimulateResponse | null;
+  };
+  events?: any[];
+}
+
+export async function createSession(model?: string): Promise<SessionTree> {
+  return postJson('/sessions', { model });
+}
+export async function listSessions(): Promise<SessionInfo[]> {
+  return (await getJson<{ sessions: SessionInfo[] }>('/sessions')).sessions;
+}
+export async function getSession(id: string): Promise<SessionTree> {
+  return getJson(`/sessions/${id}`);
+}
+export async function renameSession(id: string, name: string): Promise<SessionTree> {
+  const r = await fetch(`${API}/sessions/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error(`rename failed: ${r.status}`);
+  return r.json();
+}
+export async function deleteSession(id: string): Promise<void> {
+  await fetch(`${API}/sessions/${id}`, { method: 'DELETE' });
+}
+export async function checkoutNode(id: string, nodeId: string): Promise<NodeRestore> {
+  return postJson(`/sessions/${id}/checkout`, { node_id: nodeId });
+}
+export async function getNode(id: string, nodeId: string): Promise<NodeRestore> {
+  return getJson(`/sessions/${id}/node/${nodeId}`);
+}
+export async function logSessionEvent(
+  id: string, type: string, payload: any,
+  node?: { kind: string; label: string; snapshot: any },
+): Promise<any> {
+  return postJson(`/sessions/${id}/event`, {
+    type, payload,
+    make_node: !!node, kind: node?.kind, label: node?.label, snapshot: node?.snapshot,
+  });
+}
+
 export async function executeCode(
   code: string, resolution: number, tpms_optimizer_mode: TpmsMode,
 ): Promise<ExecuteResponse> {
@@ -33,9 +100,9 @@ export async function executeCode(
 
 export async function simulate(
   code: string, resolution: number, tpms_optimizer_mode: TpmsMode,
-  backend: SimBackend, E = 1.0, nu = 0.45,
+  backend: SimBackend, E = 1.0, nu = 0.45, session_id?: string,
 ): Promise<SimulateResponse> {
-  return postJson('/simulate', { code, resolution, tpms_optimizer_mode, backend, E, nu });
+  return postJson('/simulate', { code, resolution, tpms_optimizer_mode, backend, E, nu, session_id });
 }
 
 // --- streaming geometry (SSE) with live progress + cancellation ----------
@@ -50,12 +117,12 @@ export type ExecEvent =
 
 export async function* streamExecute(
   code: string, resolution: number, tpms_optimizer_mode: TpmsMode,
-  signal?: AbortSignal,
+  signal?: AbortSignal, session_id?: string,
 ): AsyncGenerator<ExecEvent> {
   const r = await fetch(`${API}/execute/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, resolution, tpms_optimizer_mode }),
+    body: JSON.stringify({ code, resolution, tpms_optimizer_mode, session_id }),
     signal,
   });
   if (!r.ok) {
@@ -164,11 +231,13 @@ export async function* streamChat(
   messages: ChatMessage[], state: ChatStateContext,
   signal?: AbortSignal,
   model = 'claude-opus-4-7',
+  opts?: { thinking?: boolean; session_id?: string },
 ): AsyncGenerator<ChatEvent> {
   const r = await fetch(`${API}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, state, model }),
+    body: JSON.stringify({ messages, state, model,
+                           thinking: opts?.thinking, session_id: opts?.session_id }),
     signal,
   });
   if (!r.ok) {
@@ -206,6 +275,7 @@ function parseSSE(chunk: string): ChatEvent | null {
     const d = data ? JSON.parse(data) : {};
     switch (event) {
       case 'text': return { kind: 'text', text: d.text };
+      case 'thinking': return { kind: 'thinking', text: d.text };
       case 'tool_call_start': return { kind: 'tool_call_start', id: d.id, name: d.name };
       case 'tool_ui': {
         const { tool_id, name, ...payload } = d;
