@@ -526,19 +526,24 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
             pass
 
     # --- thinking config (per-request override > config default) ---
-    # Claude 4.x uses ADAPTIVE thinking controlled by output_config.effort
-    # (the older {type:'enabled', budget_tokens} API is rejected by these
-    # models). Note: opus-4.x does not return the thinking trace as content,
-    # so effort tunes internal reasoning depth (latency/quality) rather than
-    # producing a visible chain-of-thought. The 'thinking' SSE / logged
-    # thinking blocks only populate for models that do return them.
+    # Claude 4.x uses ADAPTIVE thinking (the legacy {type:'enabled',
+    # budget_tokens} API is rejected by opus-4.7/4.8). Two non-obvious points:
+    #  - opus-4.7/4.8 default thinking.display to "omitted" (empty thinking +
+    #    signature), so we set display="summarized" to receive the readable CoT
+    #    that streams as 'thinking' deltas (-> our 'thinking' SSE + CoT panel).
+    #  - thinking is adaptive: at effort 'high' the model may skip thinking on
+    #    easy turns; 'xhigh'/'max' engage it more reliably and deeply.
+    # effort also governs total token spend, so give thinking room via max_tokens.
     want_think = (req.thinking if req.thinking is not None
                   else bool(cfg('copilot.thinking.enabled', True)))
     effort = cfg('copilot.thinking.effort', 'high')
+    think_max = int(cfg('copilot.thinking.max_tokens', 16000))
     max_tokens = req.max_tokens
     if want_think:
-        thinking_param = {'type': 'adaptive'}
+        thinking_param = {'type': 'adaptive', 'display': 'summarized'}
         output_config = {'effort': effort}
+        if max_tokens < think_max:
+            max_tokens = think_max   # leave room for thinking + the answer
     else:
         thinking_param = {'type': 'disabled'}
         output_config = None

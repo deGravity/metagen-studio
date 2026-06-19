@@ -33,6 +33,7 @@ _ENV_OVERRIDES = {
     'METAGEN_STUDIO_SESSIONS_ENABLED': 'sessions.enabled',
     'METAGEN_STUDIO_THINKING_ENABLED': 'copilot.thinking.enabled',
     'METAGEN_STUDIO_THINKING_EFFORT': 'copilot.thinking.effort',
+    'METAGEN_STUDIO_THINKING_MAX_TOKENS': 'copilot.thinking.max_tokens',
     'METAGEN_STUDIO_AUTONAME_ENABLED': 'copilot.autoname.enabled',
     'METAGEN_STUDIO_AUTONAME_MODEL': 'copilot.autoname.model',
 }
@@ -40,7 +41,8 @@ _ENV_OVERRIDES = {
 _PATH_KEYS = {'sessions.dir'}          # values that should be ~-expanded
 _BOOL_KEYS = {'sessions.enabled', 'copilot.thinking.enabled',
               'copilot.autoname.enabled'}
-_INT_KEYS = {'copilot.autoname.every_turns', 'copilot.autoname.idle_seconds'}
+_INT_KEYS = {'copilot.thinking.max_tokens', 'copilot.autoname.every_turns',
+             'copilot.autoname.idle_seconds'}
 
 _cache: dict | None = None
 

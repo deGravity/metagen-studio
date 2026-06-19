@@ -109,35 +109,55 @@ There are **two different thinking APIs**, and the model decides which applies:
   + `output_config={effort: low|medium|high}` → the model **adaptively** decides
   how much to reason; effort tunes depth.
 
-**Key empirical finding (probed against `claude-opus-4-7`):**
+### 3a. The two APIs and what opus-4-7 requires
 
-| request                                   | result                          |
-|-------------------------------------------|---------------------------------|
-| baseline (no thinking arg)                | 200 OK, **0 thinking blocks**   |
-| `enabled` + `budget_tokens` (legacy)      | **400** "not supported … use adaptive + output_config.effort" |
-| `adaptive` + `effort:high` (and `disabled`)| 200 OK, **0 thinking blocks**   |
-| + `interleaved-thinking` beta             | 200 OK, **0 thinking blocks**   |
+- **Manual / extended (Claude 3.7–Opus 4.5):** `thinking={type:'enabled',
+  budget_tokens:N}` (budget < max_tokens). Returns `thinking` content blocks.
+- **Adaptive (Claude 4.6+ incl. opus-4-7/4.8 — the ONLY mode they accept):**
+  `thinking={type:'adaptive'}` and **`output_config={effort: low|medium|high|xhigh|max}`**.
+  On opus-4-7/4.8, manual `enabled+budget` is **rejected with a 400** (the error
+  you hit). Thinking is **off** unless you explicitly pass `thinking=adaptive`.
 
-So for **opus-4-7 the thinking trace is internal and never returned as content**
-— not via create, not via streaming, not with the interleaved-thinking beta.
-Consequences:
+Two non-obvious wrinkles that produce the "no thinking" surprise:
 
-1. The "thinking" you saw **before** our changes was **not** a thinking trace —
-   the model sent no thinking blocks. It was the model's normal, structured
-   step-by-step **text** output (which reads like reasoning). Nothing in the
-   pre-sessions harness requested or surfaced thinking.
-2. Our P1 code used the **legacy** `enabled+budget` API, which **400s on
-   opus-4-7** — and since thinking defaulted *on*, that broke every chat turn.
-   (This is the `BadRequestError` you hit.)
-3. **Fix:** the toggle now maps to the adaptive API —
-   on → `thinking={type:'adaptive'}` + `output_config={effort}` (default
-   `high`); off → `thinking={type:'disabled'}`. This **tunes internal reasoning
-   depth / latency / quality**, but for opus-4-7 it does **not** produce a
-   visible chain-of-thought, so the live "💭 thinking" panel and the logged
-   `thinking` content blocks stay empty for this model.
+1. **`display` defaults to `"omitted"` on opus-4.7/4.8.** The model still thinks,
+   but the `thinking` field comes back **empty** (only an encrypted `signature`).
+   You must set **`display:"summarized"`** to receive the readable summary.
+2. **Adaptive *skips* thinking on easy turns at `effort:high`.** It only "almost
+   always" thinks; `xhigh`/`max` engage it reliably and more deeply (`xhigh` is
+   the documented opus-4-7 sweet spot for agentic/coding work). `effort` also
+   bounds *total* token spend (text + tool calls + thinking), so thinking needs
+   `max_tokens` headroom.
 
-The harness still *handles* returned thinking blocks (streams a `thinking` SSE
-event; preserves them through tool round-trips; logs them) — so if you point the
-studio at a model that *does* return a thinking trace, the CoT panel and the
-session log will populate automatically with no further changes.
+**Empirical (probed against `claude-opus-4-7`):**
+
+| request                                              | thinking block returned?     |
+|------------------------------------------------------|------------------------------|
+| `enabled` + `budget_tokens` (legacy)                 | **400 — not supported**      |
+| `adaptive` + `effort:high`, **no `display`**         | none (omitted + often skips) |
+| `adaptive` + `display:summarized` + `effort:high`    | usually none (skipped)       |
+| `adaptive` + `display:summarized` + `effort:xhigh`   | **yes — 815 chars, 889 thinking_tokens** |
+| `adaptive` + `display:summarized` + `effort:max`     | **yes — 2360 chars, 4312 thinking_tokens** |
+| streaming, `adaptive+summarized+xhigh`               | **12 `thinking` deltas → our `thinking` SSE fires** |
+
+So **opus-4-7 *does* expose a (summarized) chain-of-thought** — earlier I
+concluded otherwise because I omitted `display:"summarized"` and tested at
+`high` (where adaptive skipped). Corrected understanding:
+
+1. The "thinking" seen **before** our changes was the model's normal step-by-step
+   **text** (pre-sessions never sent a thinking arg, so no thinking blocks).
+2. P1 used the **legacy `enabled+budget`** API → **400** on opus-4-7, and since
+   thinking defaulted on it broke every turn (the `BadRequestError`).
+3. **Fix (current):** toggle on → `thinking={type:'adaptive', display:'summarized'}`
+   + `output_config={effort}` (config `copilot.thinking.effort`, default `high`)
+   + `max_tokens` raised to `copilot.thinking.max_tokens` (16k) for headroom;
+   toggle off → `thinking={type:'disabled'}`. When the model thinks, the summary
+   streams as `thinking` deltas → the `thinking` SSE → the live "💭 thinking"
+   panel and the session log populate. At `high` thinking is adaptive (shows on
+   the turns the model deems worth it); set effort to `xhigh`/`max` to force it.
+
+**Tool-use note:** with thinking active, `thinking` blocks (incl. their
+`signature`) must be passed back unchanged on tool round-trips — the loop
+reconstructs `api_blocks` with thinking + signature to satisfy this; adaptive
+auto-enables interleaved thinking (thinking between tool calls).
 ```

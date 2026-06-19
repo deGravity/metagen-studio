@@ -16,14 +16,16 @@ sessions:
   dir: ~/.metagen-studio/sessions
 
 copilot:
-  # Thinking. Claude 4.x uses ADAPTIVE thinking controlled by `effort`
-  # (low|medium|high); the older fixed token budget is not supported.
-  # Toggleable from the UI per request; this sets the default + effort level.
-  # NB: opus-4.x does not return the thinking trace as content, so `effort`
-  # tunes internal reasoning depth/latency rather than a visible CoT.
+  # Thinking. Claude 4.x uses ADAPTIVE thinking (the fixed budget_tokens API is
+  # rejected by opus-4.7/4.8). When on we request display="summarized" so the
+  # readable chain-of-thought streams to the UI. Thinking is adaptive: at
+  # effort=high the model may skip it on easy turns; xhigh/max engage it more
+  # reliably/deeply (xhigh is the opus-4.7 sweet spot). effort also bounds total
+  # token spend, so max_tokens gives thinking room. Toggleable per request.
   thinking:
     enabled: true
-    effort: high
+    effort: high          # low | medium | high | xhigh | max
+    max_tokens: 16000     # raised automatically when thinking is on
   # Out-of-band session auto-naming (small model summarizes the chat).
   autoname:
     enabled: true
