@@ -525,16 +525,23 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
         except Exception:  # noqa: BLE001
             pass
 
-    # --- extended thinking config (per-request override > config default) ---
+    # --- thinking config (per-request override > config default) ---
+    # Claude 4.x uses ADAPTIVE thinking controlled by output_config.effort
+    # (the older {type:'enabled', budget_tokens} API is rejected by these
+    # models). Note: opus-4.x does not return the thinking trace as content,
+    # so effort tunes internal reasoning depth (latency/quality) rather than
+    # producing a visible chain-of-thought. The 'thinking' SSE / logged
+    # thinking blocks only populate for models that do return them.
     want_think = (req.thinking if req.thinking is not None
                   else bool(cfg('copilot.thinking.enabled', True)))
-    budget = int(cfg('copilot.thinking.budget_tokens', 4000))
+    effort = cfg('copilot.thinking.effort', 'high')
     max_tokens = req.max_tokens
-    thinking_param = None
     if want_think:
-        if max_tokens <= budget:
-            max_tokens = budget + 4096  # response budget must exceed thinking budget
-        thinking_param = {'type': 'enabled', 'budget_tokens': budget}
+        thinking_param = {'type': 'adaptive'}
+        output_config = {'effort': effort}
+    else:
+        thinking_param = {'type': 'disabled'}
+        output_config = None
 
     api_messages: list[dict] = [{'role': m.role, 'content': m.content}
                                 for m in req.messages]
@@ -550,6 +557,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
             log('copilot_request', {
                 'call_index': call_index, 'model': req.model,
                 'max_tokens': max_tokens, 'thinking': thinking_param,
+                'output_config': output_config,
                 'system': [b.get('text', '') for b in system],
                 'messages': api_messages,
                 'tools': [t['name'] for t in TOOLS]})
@@ -557,9 +565,10 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
             stream_kwargs = dict(
                 model=req.model, max_tokens=max_tokens,
                 messages=api_messages, system=system, tools=TOOLS,
+                thinking=thinking_param,
                 extra_headers={'anthropic-beta': 'files-api-2025-04-14'})
-            if thinking_param:
-                stream_kwargs['thinking'] = thinking_param
+            if output_config:
+                stream_kwargs['output_config'] = output_config
 
             async with client.messages.stream(**stream_kwargs) as stream:
                 async for event in stream:
