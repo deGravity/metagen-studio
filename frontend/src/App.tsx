@@ -130,6 +130,22 @@ export default function App() {
     } catch (e: any) { setError(`open session: ${e.message}`); }
   }
 
+  // when the explorer rewinds HEAD (separate tab), restore that node here
+  useEffect(() => {
+    if (!sessionId) return;
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('studio-session');
+      bc.onmessage = (e) => {
+        const m: any = e.data;
+        if (m?.type === 'checkout' && m.session_id === sessionId && m.node_id) {
+          getNode(sessionId, m.node_id).then(applyRestore).catch(() => {});
+        }
+      };
+    } catch { /* BroadcastChannel unsupported */ }
+    return () => { try { bc?.close(); } catch { /* noop */ } };
+  }, [sessionId]);
+
   async function doRename(name: string) {
     if (!sessionId) return;
     try { const t = await renameSession(sessionId, name); setSessionName(t.name); setSessionNameSource(t.name_source); listSessions().then(setSessions).catch(() => {}); }
@@ -309,6 +325,14 @@ export default function App() {
           onPick={pickSession}
           onRename={doRename}
         />
+        <button
+          className="logs-btn"
+          disabled={!sessionId}
+          title="open the full session log explorer in a new tab"
+          onClick={() => sessionId && window.open(`/explorer?session=${sessionId}`, '_blank')}
+        >
+          logs ↗
+        </button>
         <div className="hash">code: <code>{currentHash || '…'}</code></div>
       </header>
       <div className="layout">
