@@ -1,6 +1,8 @@
 # Studio Sessions — design & implementation plan
 
-Status: **proposal** (no code yet). Branch: `feat/session-history`.
+Status: **implemented** (P1–P5). Branch: `feat/session-history`.
+P1 logging spine · P2 frontend wiring + restore · P3 Log Explorer ·
+P4 auto-naming · P5 cleanup view — all landed; see §11 for the phase list.
 
 ## 1. Goals (from the request)
 

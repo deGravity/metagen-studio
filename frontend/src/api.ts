@@ -76,6 +76,16 @@ export async function renameSession(id: string, name: string): Promise<SessionTr
 export async function deleteSession(id: string): Promise<void> {
   await fetch(`${API}/sessions/${id}`, { method: 'DELETE' });
 }
+export interface SessionUsage { sessions: (SessionInfo & { size_bytes: number })[]; total_bytes: number; }
+export async function sessionsUsage(): Promise<SessionUsage> {
+  return getJson('/sessions-usage');
+}
+export async function pruneSession(id: string): Promise<SessionTree> {
+  return postJson(`/sessions/${id}/prune`, {});
+}
+export async function deleteOlder(id: string): Promise<{ deleted: number }> {
+  return postJson(`/sessions/${id}/delete-older`, {});
+}
 export async function checkoutNode(id: string, nodeId: string): Promise<NodeRestore> {
   return postJson(`/sessions/${id}/checkout`, { node_id: nodeId });
 }

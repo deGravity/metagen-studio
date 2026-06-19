@@ -9,6 +9,7 @@ interface Props {
   onNew: () => void;
   onPick: (id: string) => void;
   onRename: (name: string) => void;
+  onManage: () => void;
 }
 
 export function SessionBar(props: Props) {
@@ -62,6 +63,9 @@ export function SessionBar(props: Props) {
                 <span className="si-meta">{s.n_nodes} nodes · {new Date(s.updated).toLocaleString()}</span>
               </button>
             ))}
+            <button className="session-manage" onClick={() => { setOpen(false); props.onManage(); }}>
+              ⚙ Manage storage…
+            </button>
           </div>
         )}
       </div>

@@ -282,3 +282,103 @@ def session_size(sid: str) -> int:
             except OSError:
                 pass
     return total
+
+
+# --------------------------------------------------------------------------- #
+# cleanup / retention (P5)
+# --------------------------------------------------------------------------- #
+def usage() -> dict:
+    """Per-session disk usage + total, for the cleanup view."""
+    out = []
+    total = 0
+    for s in list_sessions():
+        sz = session_size(s['id'])
+        total += sz
+        out.append({**s, 'size_bytes': sz})
+    return {'sessions': out, 'total_bytes': total}
+
+
+def _blob_refs_in(obj) -> set:
+    """Collect any 'blob_...' references nested anywhere in a JSON-like value."""
+    refs = set()
+    def walk(v):
+        if isinstance(v, str) and v.startswith('blob_'):
+            refs.add(v[len('blob_'):])
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    walk(obj)
+    return refs
+
+
+def prune_to_branch(sid: str) -> Optional[dict]:
+    """Keep only the root→HEAD lineage (the current branch); drop sibling
+    branches, their events, and orphaned blobs. Returns the new tree."""
+    with _lock:
+        tree = get_tree(sid)
+        if tree is None:
+            return None
+        keep = set(path_to_root(sid, tree['head']))
+        if not keep:
+            return tree
+        # rewrite nodes: keep lineage; fix children to only kept ids
+        new_nodes = {}
+        for nid in keep:
+            n = dict(tree['nodes'][nid])
+            n['children'] = [c for c in n['children'] if c in keep]
+            new_nodes[nid] = n
+        tree['nodes'] = new_nodes
+        tree['updated'] = _now()
+        _write_json_atomic(_sdir(sid) / 'tree.json', tree)
+        # rewrite events.jsonl keeping events for kept nodes (or node-less)
+        p = _sdir(sid) / 'events.jsonl'
+        kept_refs = set()
+        for nid in keep:
+            snap = new_nodes[nid].get('snapshot', {})
+            for r in (snap.get('geometry_ref'), snap.get('sim_ref')):
+                if r:
+                    kept_refs.add(r[len('blob_'):] if r.startswith('blob_') else r)
+        if p.exists():
+            kept_lines = []
+            for line in open(p):
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get('node_id') in keep or ev.get('node_id') is None:
+                    kept_lines.append(line.rstrip('\n'))
+                    kept_refs |= _blob_refs_in(ev.get('payload'))
+            tmp = p.with_suffix('.jsonl.tmp')
+            with open(tmp, 'w') as f:
+                f.write('\n'.join(kept_lines) + ('\n' if kept_lines else ''))
+            os.replace(tmp, p)
+        # GC blobs not referenced by kept nodes/events
+        bdir = _sdir(sid) / 'blobs'
+        if bdir.is_dir():
+            for f in bdir.glob('*.json.gz'):
+                if f.name[:-len('.json.gz')] not in kept_refs:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+        _index_upsert(tree)
+        return tree
+
+
+def delete_older(sid: str) -> int:
+    """Delete this session and every session last updated at or before it.
+    Returns the number of sessions removed."""
+    idx = list_sessions()
+    target = next((s for s in idx if s['id'] == sid), None)
+    if target is None:
+        return 0
+    cutoff = target['updated']
+    victims = [s['id'] for s in idx if s.get('updated', '') <= cutoff]
+    n = 0
+    for vid in victims:
+        if delete_session(vid):
+            n += 1
+    return n

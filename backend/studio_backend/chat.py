@@ -49,6 +49,74 @@ def _turn_label(req: ChatRequest) -> str:
     return ('copilot: ' + txt[:60]) if txt else 'chat turn'
 
 
+_AUTONAME_TASKS: set = set()
+
+
+def _schedule_autoname(sid: str) -> None:
+    if not sid:
+        return
+    try:
+        t = asyncio.create_task(_maybe_autoname(sid))
+        _AUTONAME_TASKS.add(t)
+        t.add_done_callback(_AUTONAME_TASKS.discard)
+    except RuntimeError:
+        pass  # no running loop (shouldn't happen under uvicorn)
+
+
+async def _maybe_autoname(sid: str) -> None:
+    """Out-of-band: summarize the chat into a short title via a small model.
+    Never overwrites a user-set name; runs on a turn cadence."""
+    try:
+        if not bool(cfg('copilot.autoname.enabled', True)):
+            return
+        tree = _sess.get_tree(sid)
+        if tree is None or tree.get('name_source') == 'user':
+            return
+        every = int(cfg('copilot.autoname.every_turns', 5))
+        n_turns = sum(1 for n in tree['nodes'].values()
+                      if n.get('kind') == 'assistant_turn')
+        if not (n_turns == 1 or (every > 0 and n_turns % every == 0)):
+            return
+
+        lines: list[str] = []
+        for ev in _sess.read_events(sid, types={'user_message', 'copilot_response'}):
+            p = ev['payload']
+            if ev['type'] == 'user_message':
+                c = p.get('content')
+                txt = (c if isinstance(c, str)
+                       else ' '.join(b.get('text', '') for b in c
+                                     if isinstance(b, dict) and b.get('type') == 'text')
+                       if isinstance(c, list) else '')
+                if txt.strip():
+                    lines.append('User: ' + txt.strip()[:300])
+            else:
+                for b in p.get('content_blocks', []):
+                    if b.get('type') == 'text' and b.get('text'):
+                        lines.append('Assistant: ' + b['text'].strip()[:300])
+                        break
+        transcript = '\n'.join(lines[-12:])
+        if not transcript.strip():
+            return
+
+        api_key = os.environ.get('METAGEN_ANTHROPIC_API_KEY')
+        if not api_key:
+            return
+        model = cfg('copilot.autoname.model', 'claude-haiku-4-5-20251001')
+        client = AsyncAnthropic(api_key=api_key)
+        resp = await client.messages.create(
+            model=model, max_tokens=24,
+            system=("You title metamaterial-design chat sessions. Reply with ONLY a "
+                    "concise title of at most 6 words — no quotes, no trailing "
+                    "punctuation."),
+            messages=[{'role': 'user', 'content': transcript}])
+        title = ''.join(getattr(b, 'text', '') for b in resp.content
+                        if getattr(b, 'type', None) == 'text').strip().strip('"').strip()
+        if title:
+            _sess.set_name(sid, title[:60], 'auto')
+    except Exception:  # noqa: BLE001 — naming is best-effort
+        pass
+
+
 def _compact_ui_for_log(sid, ui: dict) -> dict:
     """Spill mesh b64 to a dedup'd blob so events.jsonl stays lean."""
     if not ui or not ('vertices_b64' in ui or 'triangles_b64' in ui):
@@ -542,6 +610,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
             if final.stop_reason != 'tool_use' or not tool_uses:
                 yield _sse('done', {'stop_reason': final.stop_reason})
                 finalize_node()
+                _schedule_autoname(sid)
                 return
 
             tool_result_blocks: list[dict] = []

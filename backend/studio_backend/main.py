@@ -251,6 +251,27 @@ def list_sessions():
     return {'sessions': _sessions.list_sessions()}
 
 
+@app.get('/api/sessions-usage')
+def sessions_usage():
+    """Per-session disk usage + total, for the cleanup view."""
+    return _sessions.usage()
+
+
+@app.post('/api/sessions/{sid}/prune')
+def prune_session(sid: str):
+    """Drop everything off the current branch (keep root→HEAD lineage)."""
+    tree = _sessions.prune_to_branch(sid)
+    if tree is None:
+        raise HTTPException(status_code=404, detail='no such session')
+    return tree
+
+
+@app.post('/api/sessions/{sid}/delete-older')
+def delete_older(sid: str):
+    """Delete this session and all sessions last updated at/before it."""
+    return {'deleted': _sessions.delete_older(sid)}
+
+
 @app.get('/api/sessions/{sid}')
 def get_session(sid: str):
     tree = _sessions.get_tree(sid)

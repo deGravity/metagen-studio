@@ -15,6 +15,7 @@ interface Props {
   onApplyProposal: (newCode: string, proposalId: string, summary: string) => void;
   onGeometryDone: (summary: any) => void;
   onSimDone: (summary: any) => void;
+  onTurnDone?: () => void;
 }
 
 interface ChatTurn {
@@ -317,6 +318,7 @@ export function ChatPanel(props: Props) {
             }
             return next;
           });
+          props.onTurnDone?.();
         } else if (ev.kind === 'error') {
           setError(ev.message);
           break;

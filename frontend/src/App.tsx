@@ -5,6 +5,7 @@ import { SettingsPanel } from './components/Settings';
 import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
 import { SessionBar } from './components/SessionBar';
+import { CleanupModal } from './components/CleanupModal';
 import {
   simulate, getInfo, decodeMesh, streamExecute, cancelJob, getCachedResults,
   createSession, listSessions, getSession, renameSession, getNode, logSessionEvent,
@@ -70,6 +71,26 @@ export default function App() {
   const [sessionNameSource, setSessionNameSource] = useState('auto');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [thinking, setThinking] = useState(true);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+
+  // refresh current session name/source + the picker list (e.g. after auto-naming)
+  async function refreshSessionMeta() {
+    if (!sessionId) return;
+    try {
+      const t = await getSession(sessionId);
+      setSessionName(t.name); setSessionNameSource(t.name_source);
+    } catch { /* ignore */ }
+    listSessions().then(setSessions).catch(() => {});
+  }
+
+  // after cleanup deletions: if the current session is gone, start fresh
+  async function afterCleanup() {
+    try {
+      const list = await listSessions();
+      setSessions(list);
+      if (sessionId && !list.some((s) => s.id === sessionId)) await newSession();
+    } catch { /* ignore */ }
+  }
 
   // Restore the editor/viewer/results from a session node snapshot.
   function applyRestore(r: NodeRestore) {
@@ -324,6 +345,7 @@ export default function App() {
           onNew={newSession}
           onPick={pickSession}
           onRename={doRename}
+          onManage={() => setCleanupOpen(true)}
         />
         <button
           className="logs-btn"
@@ -359,6 +381,7 @@ export default function App() {
               onApplyProposal={applyProposal}
               onGeometryDone={chatGeometryDone}
               onSimDone={chatSimDone}
+              onTurnDone={refreshSessionMeta}
             />
           </div>
         </div>
@@ -392,6 +415,13 @@ export default function App() {
           </div>
         </div>
       </div>
+      {cleanupOpen && (
+        <CleanupModal
+          currentId={sessionId}
+          onClose={() => setCleanupOpen(false)}
+          onChanged={afterCleanup}
+        />
+      )}
     </div>
   );
 }
