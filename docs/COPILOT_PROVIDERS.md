@@ -20,6 +20,9 @@ in other tools (e.g. a CAD plugin).
 - **Headless mode** for benchmarking many models over task suites.
 - A clean **embedding boundary** so a CAD plugin (or anything) can host the
   copilot with its own tool implementations.
+- **Streaming preserved** end-to-end (the studio stays responsive — §4.7).
+- Built as a **self-contained module** that can later move to its own
+  package/repo (likely with the backend server) — §9.
 
 **Non-goals (now)**: changing the DSL/kernel; a universal "best" model; fine-
 tuning. Streaming-to-UI stays, but becomes one consumer among several.
@@ -51,7 +54,7 @@ substrate for transcripts in *all* modes, including benchmarking.
 | tool calling | native (`tool_use`), parallel | native functions, parallel | native `functionDeclarations`, parallel | yes — `--enable-auto-tool-choice --tool-call-parser qwen3_coder`/hermes | yes — harmony/`openai` tool parser |
 | tool_choice | `auto`/`none` (not `any`/named while thinking) | `auto`/`required`/`none`/named | `auto`/`any`/`none` | `auto`/`required`/`none` | `auto`/`required`/`none` |
 | native PDF | ✅ document block + Files API | ✅ `input_file` (extracts text **and** page images for vision models) | ✅ inline_data / File API, ≤1000 pg / 50 MB, native (no manual OCR) | ❌ text-only | ❌ text-only |
-| images | ✅ | ✅ (vision) | ✅ | ✅ on VL variants (Qwen3-VL); base/text Qwen3 = text-only | ❌ (text-only) |
+| images | ✅ | ✅ (vision) | ✅ | ✅ — **Qwen3.5 / 3.6 accept images natively** (incl. non-"VL" variants) | ❌ (text-only) |
 | reasoning / "thinking" | adaptive + `output_config.effort`; summarized CoT + `signature` | `reasoning.effort` low/med/high/xhigh + reasoning summaries | `thinkingConfig.thinkingBudget` + thought summaries | `enable_thinking` + `reasoning_content` (`--reasoning-parser qwen3`) | reasoning effort via harmony "analysis" channel |
 | streaming | SSE: text/thinking/tool deltas | SSE: Responses events | `streamGenerateContent` | OpenAI-compat stream; `reasoning_content` + tool deltas (parser-dependent) | same |
 
@@ -176,6 +179,22 @@ Owns: build system+messages from a `Transcript`, call `provider.stream`, relay
 append `tool_result`, loop to `MAX_TURNS`; persist every step to the session
 event log. No Anthropic or HTTP specifics here.
 
+### 4.7 Streaming is preserved (and first-class)
+The engine is **streaming-native**: `provider.stream()` and `CopilotEngine`
+yield an `AsyncIterator[Event]`, so the studio's responsive feel is retained —
+the FastAPI/SSE layer stays a thin adapter that maps normalized `Event`s
+(`text_delta`, `thinking_delta`, `tool_call`, `artifact`, …) to today's SSE
+events 1:1. Nothing about the live UX changes.
+
+Capability `tool_streaming` records how granular a provider's stream is, with
+**graceful degradation**: every adapter streams assistant **text** token-by-
+token; where a backend can't stream *tool-call arguments* incrementally (some
+vLLM `--tool-call-parser`s emit the tool call only at block end), the adapter
+still emits a `tool_call` event as soon as it's available and the loop proceeds
+— the user sees streamed text + a "calling tool…" indicator exactly as now.
+Non-streaming is supported too (the benchmark runner can `collect()` the same
+iterator), so one code path serves both live and headless.
+
 ---
 
 ## 5. Headless / benchmarking mode
@@ -208,9 +227,11 @@ copilot:
       base_url: http://<vllm-host>:8000/v1
       key_env: METAGEN_VLLM_KEY   # often a dummy
       models:                     # per-model profile (parser quirks, caps)
-        qwen3:       { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: false }
-        qwen3-vl:    { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: true  }
+        qwen3.5:     { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: true  }
+        qwen3.6:     { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: true  }
         gpt-oss-120b:{ tool_parser: harmony,     reasoning: effort,  native_pdf: false, native_images: false }
+      # (Qwen3.5/3.6 take images natively; none of the open models take PDF —
+      #  always render PDF -> images/text via the §4.4 pipeline first.)
   pdf:
     backend: pymupdf4llm          # pymupdf4llm | marker | pdfmux | vision_ocr
     mode: both                    # text_only | images | both (gated by model caps)
@@ -250,6 +271,9 @@ default leaves them unset so the live copilot behaves identically to now.
   Capture CoT + token cost per run into the session log; cross-model report.
 - **P6 — embedding boundary doc + example** (CAD-plugin-style host that supplies
   its own `ToolEnv`).
+- **P7 — extract `metagen-copilot` as its own package/repo** (likely shipped
+  with the backend server). Mechanical once P1's boundary holds: bump `copilot/`
+  to a package with its own `pyproject`, studio depends on it. See §9.
 
 Each phase ships independently; P1 leaves the studio unchanged.
 
@@ -273,3 +297,33 @@ Each phase ships independently; P1 leaves the studio unchanged.
 - Determinism policy for vendor APIs (temperature/seed support varies) + repeat
   count N for non-deterministic providers.
 - Which PDF backend(s) become the default after the A/B comparison.
+
+---
+
+## 9. Packaging & future extraction
+
+The copilot **lives in `metagen-studio/backend/studio_backend/copilot/` for now**,
+but is built from day one to **move out into its own module/repo later** (likely
+distributed with the backend server). To make that extraction mechanical rather
+than a rewrite, P1 enforces a hard dependency boundary:
+
+- **The engine imports nothing studio-specific.** It depends only on injected
+  interfaces, not concrete studio code:
+  - `ToolEnv` — the host supplies geometry/sim runners, compiled-program access,
+    etc. (studio binds kernel_job; CAD binds its engine; benchmark binds headless).
+  - `TranscriptStore` (protocol) — append events / read transcript. The studio's
+    `sessions.py` becomes *one implementation*; a CAD host or benchmark can pass
+    an in-memory or different store. The engine never imports `sessions` directly.
+  - `Config` is passed in (a plain dict/object), not read from studio globals.
+- **No FastAPI / SSE / HTTP inside the engine** — it only yields `Event`s; the
+  web layer adapts them. (Already true by design, §4.7.)
+- **Dependencies stay minimal**: the SDKs (anthropic/openai/google-genai) are
+  optional extras per provider; PDF backends are optional extras. The engine
+  core needs none of them to import.
+
+Target end-state: a `metagen-copilot` package — `engine`, `providers/`,
+`tools` (registry only; metamaterial tools register from the host), `pdf/`,
+`types` — with `pip install metagen-copilot[anthropic,openai,gemini,pdf]`
+extras. Studio, the benchmark runner, and any CAD integration all depend on it.
+Keeping it inside studio now costs nothing given this boundary; P7 is the lift-
+and-shift once the interfaces have settled in real use.
