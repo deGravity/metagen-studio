@@ -51,7 +51,7 @@ substrate for transcripts in *all* modes, including benchmarking.
 | tool calling | native (`tool_use`), parallel | native functions, parallel | native `functionDeclarations`, parallel | yes — `--enable-auto-tool-choice --tool-call-parser qwen3_coder`/hermes | yes — harmony/`openai` tool parser |
 | tool_choice | `auto`/`none` (not `any`/named while thinking) | `auto`/`required`/`none`/named | `auto`/`any`/`none` | `auto`/`required`/`none` | `auto`/`required`/`none` |
 | native PDF | ✅ document block + Files API | ✅ `input_file` (extracts text **and** page images for vision models) | ✅ inline_data / File API, ≤1000 pg / 50 MB, native (no manual OCR) | ❌ text-only | ❌ text-only |
-| images | ✅ | ✅ (vision) | ✅ | only VL variants (Qwen-VL); base Qwen3 text-only | ❌ |
+| images | ✅ | ✅ (vision) | ✅ | ✅ on VL variants (Qwen3-VL); base/text Qwen3 = text-only | ❌ (text-only) |
 | reasoning / "thinking" | adaptive + `output_config.effort`; summarized CoT + `signature` | `reasoning.effort` low/med/high/xhigh + reasoning summaries | `thinkingConfig.thinkingBudget` + thought summaries | `enable_thinking` + `reasoning_content` (`--reasoning-parser qwen3`) | reasoning effort via harmony "analysis" channel |
 | streaming | SSE: text/thinking/tool deltas | SSE: Responses events | `streamGenerateContent` | OpenAI-compat stream; `reasoning_content` + tool deltas (parser-dependent) | same |
 
@@ -60,11 +60,11 @@ substrate for transcripts in *all* modes, including benchmarking.
   functions, Gemini declarations) + vLLM's OpenAI-compatible variant whose
   *streaming* tool-delta shape depends on the server's `--tool-call-parser`.
   → normalize to one internal tool/call/result model.
-- **PDF** is native only on Claude/Gemini/OpenAI-vision. For **Qwen3 / gpt-oss
-  (text-only)** we must **preprocess**: extract text (PyMuPDF/pdfplumber); for
-  VL models, render pages → images. Tables/diagrams degrade in text-only
-  extraction — flag that, and optionally route PDFs through a vision model first
-  for an OCR/summary pass.
+- **PDF** is native only on Claude/Gemini/OpenAI-vision. For text-only open
+  models (gpt-oss; base Qwen3) we must **preprocess**; even for vision-capable
+  open models (Qwen3-VL) we still need to *render* the PDF to images ourselves.
+  So PDF ingest is a **pluggable preprocessing pipeline** (§4.4), not a single
+  extractor — text-only and vision passes, technique selectable in config.
 - **Reasoning** exists everywhere but is exposed differently (Anthropic effort+
   summarized blocks; OpenAI reasoning.effort+summaries; Gemini thinkingBudget;
   vLLM `reasoning_content` / harmony). → one normalized "effort" knob + a
@@ -132,10 +132,37 @@ class Tool:
   same names to its own geometry engine; the benchmark runner binds them to a
   headless kernel with no UI emission. **Same engine, different `ToolEnv`.**
 
-### 4.4 Attachment preprocessing (`copilot/attachments.py`)
-- Capability-gated: if `native_pdf` → pass the `Document` part through (Anthropic
-  doc block / Gemini inline / OpenAI input_file); else → `pdf_to_text()` (and
-  `pdf_to_images()` when `native_images`). One place, all providers benefit.
+### 4.4 PDF / attachment preprocessing pipeline (`copilot/pdf/`)
+A **pluggable** pipeline (not one extractor), so we can A/B techniques per the
+research and pick winners in config. A backend ingests a PDF → an
+`IngestedDoc{markdown|text, page_images?, per_page_confidence?, meta}`.
+
+**Backends (selectable, `copilot.pdf.backend`):**
+- `pymupdf4llm` — fast, no-ML, native-text → markdown. Default for digital PDFs;
+  great latency, weak on scans/complex tables.
+- `marker` (datalab) — deep-learning pipeline → markdown+JSON, LaTeX equations,
+  tables, extracted images. Best for papers/equations; **GPU-recommended**
+  (5–10× slower on CPU) — a natural fit to run **on the vLLM host/GPU box**, not
+  here.
+- `pdfmux` — RAG-oriented hybrid (PyMuPDF-speed pages, escalates table pages to
+  Docling) with **per-page confidence scores**; strong headings/tables.
+- `vision_ocr` — render pages → images and run a **vision model** (the active
+  provider if vision-capable, or a configured dedicated VLM) to emit
+  markdown/text. Highest fidelity on scans/diagrams; highest cost.
+- (`docling`, `mineru` are easy future drop-ins behind the same interface.)
+
+**Routing by target-model capability × config `mode` (`text_only|images|both`):**
+- `native_pdf` provider (Claude/Gemini/OpenAI-vision) → pass the `Document`
+  through **unless** config forces a backend (so we can benchmark "native PDF"
+  vs "our markdown" head-to-head).
+- `native_images` provider (Qwen3-VL) → page images (+ optional extracted text).
+- text-only provider (gpt-oss, base Qwen3) → markdown/text from the chosen
+  backend; **never** images.
+
+The pipeline caches `IngestedDoc` by `(pdf_hash, backend, opts)` (reuse the
+session blob store), so repeated turns and benchmark reruns don't re-extract.
+Backends declare their own deps/placement (e.g. `marker` may live as a small
+service on the GPU host) so this machine isn't forced to host heavy models.
 
 ### 4.5 Reasoning normalization
 - Engine exposes one `effort ∈ {off,low,medium,high,xhigh,max}`. Adapters map:
@@ -182,10 +209,23 @@ copilot:
       key_env: METAGEN_VLLM_KEY   # often a dummy
       models:                     # per-model profile (parser quirks, caps)
         qwen3:       { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: false }
+        qwen3-vl:    { tool_parser: qwen3_coder, reasoning: toggle, native_pdf: false, native_images: true  }
         gpt-oss-120b:{ tool_parser: harmony,     reasoning: effort,  native_pdf: false, native_images: false }
+  pdf:
+    backend: pymupdf4llm          # pymupdf4llm | marker | pdfmux | vision_ocr
+    mode: both                    # text_only | images | both (gated by model caps)
+    vision_ocr: { provider: gemini, model: gemini-2.5-flash }   # used by vision_ocr backend
+    marker: { endpoint: http://<gpu-host>:8xxx }                # optional remote GPU service
 ```
-Per-request overrides (provider/model/effort) flow through `ChatRequest`, so the
-UI dropdown and the benchmark runner use the same path.
+Per-request overrides (provider/model/effort/pdf-backend) flow through
+`ChatRequest`, so the UI dropdown and the benchmark runner use the same path.
+
+**Reproduce-current-behavior (compat):** the shipped defaults reproduce today's
+studio exactly — `provider: anthropic`, `model: claude-opus-4-7`, adaptive
+thinking (`display: summarized`, `effort: high`), the existing system prompt +
+DSL-docs injection, and Anthropic-native PDF. Determinism knobs (temperature,
+seed) are **opt-in settings** used by the benchmark runner; the interactive
+default leaves them unset so the live copilot behaves identically to now.
 
 ---
 
@@ -195,14 +235,19 @@ UI dropdown and the benchmark runner use the same path.
   provider-neutral `CopilotEngine` + normalized types + tool registry, with the
   **Anthropic adapter** as the first provider. Studio behaves identically; this
   is a pure refactor (sessions logging preserved). *De-risks everything.*
-- **P2 — OpenAI-compatible adapter.** Covers **both** real OpenAI and **vLLM**
-  (Qwen3, gpt-oss) via `base_url` + per-model profiles; tool-call + reasoning_
-  content parsing; `tool_choice`. Unlocks the open models on your server first
+- **P2 — OpenAI-style adapter, two modes.** `mode: responses` for **OpenAI**
+  (GPT-5.x, best tool/reasoning story) and `mode: chat_completions` for **vLLM**
+  (Qwen3, gpt-oss) via `base_url` + per-model profiles; tool-call + `reasoning_
+  content` parsing; `tool_choice`. Unlocks the open models on your server first
   (no PDF needed for code tasks).
-- **P3 — attachment preprocessing.** `pdf_to_text`/`pdf_to_images`, capability-
-  gated, so non-native-PDF models work.
-- **P4 — Gemini adapter** (native PDF + thinkingBudget).
-- **P5 — headless BenchmarkRunner** + scoring + cross-model report.
+- **P3 — PDF preprocessing pipeline** (§4.4): backend interface +
+  `pymupdf4llm`/`pdfmux`/`marker`/`vision_ocr`, capability-gated routing, cached
+  ingest. Config-selectable so we can compare techniques.
+- **P4 — Gemini adapter** (native PDF + thinkingBudget + thought summaries).
+- **P5 — headless runner + adapt existing evals.** Wire the BenchmarkRunner over
+  `CopilotEngine` with a no-UI `ToolEnv`; **adapt the existing non-agentic
+  codegen eval suites first** (lower lift) before authoring a new agentic suite.
+  Capture CoT + token cost per run into the session log; cross-model report.
 - **P6 — embedding boundary doc + example** (CAD-plugin-style host that supplies
   its own `ToolEnv`).
 
@@ -210,17 +255,21 @@ Each phase ships independently; P1 leaves the studio unchanged.
 
 ---
 
-## 8. Open decisions
-1. **OpenAI surface**: target the **Responses API** (best tool/reasoning story,
-   needed for GPT-5.x) and treat **vLLM** via **Chat Completions** — i.e. two
-   OpenAI-style adapters, or one with a mode flag? (Lean: one adapter, two modes.)
-2. **PDF for text-only open models**: text-extract only, or also a vision-model
-   OCR/summarize pre-pass (extra cost/dependency)? Default = text-extract, with a
-   capability note surfaced to the user.
-3. **Reasoning/CoT in benchmarks**: capture provider CoT where available
-   (Anthropic summary, OpenAI/Gemini summaries, vLLM `reasoning_content`) into
-   the session log for analysis — agreed? (cost: tokens/storage.)
-4. **Determinism**: fix temperature=0 / seeds for benchmarking where supported
-   (vLLM yes; vendor APIs partially) and run N repeats elsewhere — set N.
-5. **Scope of first eval suite**: which tasks define "good" (compile rate,
-   property-target hit rate, tool efficiency, token cost)? Needs a task spec.
+## 8. Decisions (resolved 2026-06-19)
+1. **OpenAI surface** — one OpenAI-style adapter with **two modes**: `responses`
+   for OpenAI (GPT-5.x), `chat_completions` for vLLM (Qwen3, gpt-oss).
+2. **PDF** — build **both** a text-only pipeline **and** a vision-model OCR pass,
+   as selectable backends (§4.4), so we can compare techniques; choice lives in
+   config. (Qwen3-VL can take page images directly; gpt-oss stays text-only.)
+3. **CoT capture** — yes: record provider CoT where available (Anthropic/OpenAI/
+   Gemini summaries, vLLM `reasoning_content`) into the session log.
+4. **Determinism** — make temp/seed/effort **settings** (used by the benchmark
+   runner); the interactive defaults must **reproduce current studio behavior
+   exactly** (see compat note in §6). Exact N / temperature policy: TBD.
+5. **Eval suite** — **adapt the existing non-agentic codegen eval suites first**;
+   a new agentic eval suite is not yet critical (deferred within P5).
+
+### Still to nail down later
+- Determinism policy for vendor APIs (temperature/seed support varies) + repeat
+  count N for non-deterministic providers.
+- Which PDF backend(s) become the default after the A/B comparison.
