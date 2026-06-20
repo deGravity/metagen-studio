@@ -99,6 +99,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = 4096
     session_id: Optional[str] = None       # log to this session if set
     thinking: Optional[bool] = None        # None = use config default
+    provider: Optional[str] = None         # None = config default / infer from model
 
 
 # --- sessions -----------------------------------------------------------

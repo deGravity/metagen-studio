@@ -34,7 +34,7 @@ from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
 from .copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
-from .copilot.providers.anthropic import AnthropicProvider
+from .copilot.providers import build_provider
 from .copilot.types import (
     SystemBlock, Msg, Text, ToolCall, ToolResult, Thinking, Raw, ToolDef,
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
@@ -93,6 +93,49 @@ def _build_registry() -> ToolRegistry:
                          schema=t['input_schema']),
             handler=_wrap_tool(h)))
     return reg
+
+
+def _infer_provider(model: str) -> str:
+    m = (model or '').lower()
+    if m.startswith('claude'):
+        return 'anthropic'
+    if m.startswith(('gpt', 'o1', 'o3', 'o4')):
+        return 'openai'
+    if m.startswith('gemini'):
+        return 'gemini'
+    return 'anthropic'
+
+
+def _resolve_provider(req: ChatRequest):
+    """Pick + build the provider for this request. Returns (provider, error):
+    on success error is None; on a config/credential problem provider is None
+    and error is a user-facing message. Defaults reproduce the previous
+    Anthropic-only behavior exactly (METAGEN_ANTHROPIC_API_KEY gate)."""
+    name = (req.provider or cfg('copilot.provider', None)
+            or _infer_provider(req.model)).lower()
+    pcfg = cfg(f'copilot.providers.{name}', {}) or {}
+    key_env = pcfg.get('key_env') or (
+        'METAGEN_ANTHROPIC_API_KEY' if name in ('anthropic', 'claude') else None)
+    api_key = os.environ.get(key_env) if key_env else None
+    base_url = pcfg.get('base_url')
+    mode = pcfg.get('mode')
+    profile = (pcfg.get('models') or {}).get(req.model, {}) or {}
+
+    is_local = name in ('vllm', 'openai-compat', 'openai_compat', 'chat_completions')
+    if is_local:
+        if not base_url:
+            return None, (f"provider '{name}' has no base_url configured "
+                          f"(set copilot.providers.{name}.base_url)")
+    elif not api_key:
+        return None, (f'{key_env} not set on backend' if key_env
+                      else f"no API key configured for provider '{name}'")
+
+    try:
+        provider = build_provider(name, api_key=api_key, base_url=base_url,
+                                  mode=mode, profile=profile)
+    except ValueError as exc:
+        return None, str(exc)
+    return provider, None
 
 
 def _turn_label(req: ChatRequest) -> str:
@@ -542,9 +585,9 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
     calls + tool loop; this function owns transport (SSE) and session logging.
     The wire protocol and events.jsonl layout are unchanged from the previous
     inline-Anthropic implementation — only the plumbing moved into the engine."""
-    api_key = os.environ.get('METAGEN_ANTHROPIC_API_KEY')
-    if not api_key:
-        yield _sse('error', {'message': 'METAGEN_ANTHROPIC_API_KEY not set on backend'})
+    provider, perr = _resolve_provider(req)
+    if perr:
+        yield _sse('error', {'message': perr})
         return
 
     sid = req.session_id
@@ -603,7 +646,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
     messages = [_to_msg(m) for m in req.messages]
     registry = _build_registry()
     env = ToolEnv(data={'state': req.state})
-    engine = CopilotEngine(AnthropicProvider(api_key=api_key), registry, max_turns=8)
+    engine = CopilotEngine(provider, registry, max_turns=8)
 
     # per-turn correlation for tool_exec logging: the engine reports tool args
     # on the AssistantMessage and the artifact/result separately, so we stitch
@@ -676,11 +719,9 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
 
 @router.post('/api/chat')
 async def chat_endpoint(req: ChatRequest):
-    if not os.environ.get('METAGEN_ANTHROPIC_API_KEY'):
-        raise HTTPException(
-            status_code=503,
-            detail='Set METAGEN_ANTHROPIC_API_KEY in the backend env to enable chat.',
-        )
+    _, perr = _resolve_provider(req)
+    if perr:
+        raise HTTPException(status_code=503, detail=perr)
     return StreamingResponse(_agent_loop(req), media_type='text/event-stream')
 
 

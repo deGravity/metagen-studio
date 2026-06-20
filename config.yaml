@@ -16,6 +16,25 @@ sessions:
   dir: ~/.metagen-studio/sessions
 
 copilot:
+  # Provider selection. Default reproduces the original Anthropic-only studio.
+  # Per-request override via ChatRequest.provider; if both are unset the
+  # provider is inferred from the model name (claude*->anthropic, gpt*/o[134]*
+  # ->openai, gemini*->gemini).
+  provider: anthropic
+  providers:
+    anthropic:
+      key_env: METAGEN_ANTHROPIC_API_KEY
+    openai:                       # OpenAI Responses API (GPT-5.x)
+      key_env: METAGEN_OPENAI_KEY
+    vllm:                         # OpenAI-compatible Chat Completions (vLLM)
+      # base_url: http://<vllm-host>:8000/v1
+      key_env: METAGEN_VLLM_KEY   # often a dummy ("EMPTY") for local servers
+      models:                     # per-model capability / reasoning profile
+        # Qwen3.5/3.6 toggle reasoning (enable_thinking) and take images
+        # natively; none of the open models accept PDF (use the P3 pipeline).
+        qwen3.5:      { reasoning: toggle, native_images: true,  native_pdf: false }
+        qwen3.6:      { reasoning: toggle, native_images: true,  native_pdf: false }
+        gpt-oss-120b: { reasoning: effort, native_images: false, native_pdf: false }
   # Thinking. Claude 4.x uses ADAPTIVE thinking (the fixed budget_tokens API is
   # rejected by opus-4.7/4.8). When on we request display="summarized" so the
   # readable chain-of-thought streams to the UI. Thinking is adaptive: at
