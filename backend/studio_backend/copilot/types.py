@@ -131,14 +131,19 @@ class ToolResultEvent:
     tool_call_id: str
     name: str
     result: Any
+    elapsed_s: float = 0.0
 
 
 @dataclass
 class Artifact:
     """Sidecar payload a tool wants surfaced (geometry/sim/proposal/...). UI
-    consumers render it; headless consumers may ignore it."""
+    consumers render it; headless consumers may ignore it. The engine stamps
+    the originating tool's id/name so consumers can correlate without ordering
+    assumptions."""
     kind: str
     data: dict
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
 
 
 @dataclass
@@ -163,3 +168,32 @@ Event = Union[
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage,
     ToolResultEvent, Artifact, Usage, Done, ErrorEvent,
 ]
+
+
+# --------------------------------------------------------------------------- #
+# JSON serialization (for logging / transcripts) — provider-neutral
+# --------------------------------------------------------------------------- #
+def part_to_dict(p: Part) -> dict:
+    if isinstance(p, Text):
+        return {"type": "text", "text": p.text}
+    if isinstance(p, Thinking):
+        if p.redacted is not None:
+            return {"type": "redacted_thinking", "data": p.redacted}
+        return {"type": "thinking", "thinking": p.text, "signature": p.signature}
+    if isinstance(p, ToolCall):
+        return {"type": "tool_use", "id": p.id, "name": p.name, "input": p.input}
+    if isinstance(p, ToolResult):
+        return {"type": "tool_result", "tool_use_id": p.tool_call_id,
+                "content": p.content, "is_error": p.is_error}
+    if isinstance(p, Image):
+        return {"type": "image", "media_type": p.media_type, "bytes": len(p.data_b64)}
+    if isinstance(p, Document):
+        return {"type": "document", "media_type": p.media_type, "name": p.name,
+                "bytes": len(p.data_b64)}
+    if isinstance(p, Raw):
+        return {"type": "raw", "block_type": p.block.get("type")}
+    return {"type": "unknown"}
+
+
+def msg_to_dict(m: Msg) -> dict:
+    return {"role": m.role, "parts": [part_to_dict(p) for p in m.parts]}

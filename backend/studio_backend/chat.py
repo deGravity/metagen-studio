@@ -33,6 +33,66 @@ from .models import ChatRequest, ChatStateContext
 from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
+from .copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
+from .copilot.providers.anthropic import AnthropicProvider
+from .copilot.types import (
+    SystemBlock, Msg, Text, ToolCall, ToolResult, Thinking, Raw, ToolDef,
+    TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
+    Artifact, Done, ErrorEvent,
+)
+
+
+def _to_msg(m) -> Msg:
+    """ChatMessage (frontend content: str | list[dict]) -> normalized Msg.
+    Known block types are normalized; anything else (image/file attachments)
+    rides through as Raw so it reaches the Anthropic adapter verbatim."""
+    c = m.content
+    if isinstance(c, str):
+        return Msg(m.role, [Text(c)])
+    parts = []
+    for b in c:
+        if not isinstance(b, dict):
+            continue
+        t = b.get('type')
+        if t == 'text':
+            parts.append(Text(b.get('text', '')))
+        elif t == 'tool_use':
+            parts.append(ToolCall(id=b['id'], name=b['name'], input=b.get('input', {})))
+        elif t == 'tool_result':
+            parts.append(ToolResult(tool_call_id=b['tool_use_id'],
+                                    content=b.get('content', ''),
+                                    is_error=bool(b.get('is_error'))))
+        elif t == 'thinking':
+            parts.append(Thinking(text=b.get('thinking', ''), signature=b.get('signature')))
+        elif t == 'redacted_thinking':
+            parts.append(Thinking(redacted=b.get('data', '')))
+        else:
+            parts.append(Raw(block=b))
+    return Msg(m.role, parts)
+
+
+def _wrap_tool(handler):
+    """Adapt an existing (args, state)->(result, ui) tool to the engine's
+    (args, ToolEnv)->ToolOutcome contract; non-empty ui becomes an Artifact."""
+    async def h(args, env):
+        result, ui = await handler(args, env.get('state'))
+        arts = [Artifact(kind=ui.get('kind', 'tool_ui'), data=ui)] if ui else []
+        err = isinstance(result, dict) and result.get('ok') is False
+        return ToolOutcome(result=result, artifacts=arts, error=err)
+    return h
+
+
+def _build_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+    for t in TOOLS:
+        h = _TOOL_DISPATCH.get(t['name'])
+        if h is None:
+            continue
+        reg.register(Tool(
+            defn=ToolDef(name=t['name'], description=t['description'],
+                         schema=t['input_schema']),
+            handler=_wrap_tool(h)))
+    return reg
 
 
 def _turn_label(req: ChatRequest) -> str:
@@ -463,20 +523,6 @@ def _workspace_state_text(state: ChatStateContext) -> str:
     return "\n".join(parts)
 
 
-def _system_blocks(state: ChatStateContext) -> list[dict]:
-    return [
-        {
-            'type': 'text',
-            'text': _static_system_text(),
-            'cache_control': {'type': 'ephemeral'},
-        },
-        {
-            'type': 'text',
-            'text': _workspace_state_text(state),
-        },
-    ]
-
-
 def _hash12(s: str) -> str:
     import hashlib
     return hashlib.sha256(s.encode('utf-8')).hexdigest()[:12]
@@ -491,13 +537,16 @@ def _sse(event: str, data: dict) -> bytes:
 
 
 async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
+    """Drive the provider-neutral CopilotEngine and re-emit its normalized
+    event stream as the studio's SSE protocol. The engine owns the model
+    calls + tool loop; this function owns transport (SSE) and session logging.
+    The wire protocol and events.jsonl layout are unchanged from the previous
+    inline-Anthropic implementation — only the plumbing moved into the engine."""
     api_key = os.environ.get('METAGEN_ANTHROPIC_API_KEY')
     if not api_key:
         yield _sse('error', {'message': 'METAGEN_ANTHROPIC_API_KEY not set on backend'})
         return
 
-    client = AsyncAnthropic(api_key=api_key)
-    system = _system_blocks(req.state)
     sid = req.session_id
 
     # --- session logging helpers (no-ops when no session) ---
@@ -527,154 +576,102 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
 
     # --- thinking config (per-request override > config default) ---
     # Claude 4.x uses ADAPTIVE thinking (the legacy {type:'enabled',
-    # budget_tokens} API is rejected by opus-4.7/4.8). Two non-obvious points:
-    #  - opus-4.7/4.8 default thinking.display to "omitted" (empty thinking +
-    #    signature), so we set display="summarized" to receive the readable CoT
-    #    that streams as 'thinking' deltas (-> our 'thinking' SSE + CoT panel).
-    #  - thinking is adaptive: at effort 'high' the model may skip thinking on
-    #    easy turns; 'xhigh'/'max' engage it more reliably and deeply.
-    # effort also governs total token spend, so give thinking room via max_tokens.
+    # budget_tokens} API is rejected by opus-4.7/4.8). The AnthropicProvider
+    # translates a non-empty `effort` into {type:adaptive, display:summarized}
+    # + output_config.effort; we just decide whether thinking is on and how
+    # much room to leave for it. Non-obvious points handled in the adapter:
+    #  - opus-4.7/4.8 default display to "omitted"; the adapter forces
+    #    "summarized" so the readable CoT streams as 'thinking' deltas.
+    #  - thinking is adaptive: 'high' may skip on easy turns; 'xhigh'/'max'
+    #    engage it more reliably. effort also governs total token spend, so we
+    #    bump max_tokens to leave room for thinking + the answer.
     want_think = (req.thinking if req.thinking is not None
                   else bool(cfg('copilot.thinking.enabled', True)))
-    effort = cfg('copilot.thinking.effort', 'high')
+    effort = cfg('copilot.thinking.effort', 'high') if want_think else None
     think_max = int(cfg('copilot.thinking.max_tokens', 16000))
     max_tokens = req.max_tokens
-    if want_think:
-        thinking_param = {'type': 'adaptive', 'display': 'summarized'}
-        output_config = {'effort': effort}
-        if max_tokens < think_max:
-            max_tokens = think_max   # leave room for thinking + the answer
-    else:
-        thinking_param = {'type': 'disabled'}
-        output_config = None
-
-    api_messages: list[dict] = [{'role': m.role, 'content': m.content}
-                                for m in req.messages]
+    if want_think and max_tokens < think_max:
+        max_tokens = think_max
 
     if sid:
         last_user = next((m for m in reversed(req.messages) if m.role == 'user'), None)
         if last_user is not None:
             log('user_message', {'content': last_user.content})
 
-    MAX_TURNS = 8
-    for call_index in range(MAX_TURNS):
-        try:
-            log('copilot_request', {
-                'call_index': call_index, 'model': req.model,
-                'max_tokens': max_tokens, 'thinking': thinking_param,
-                'output_config': output_config,
-                'system': [b.get('text', '') for b in system],
-                'messages': api_messages,
-                'tools': [t['name'] for t in TOOLS]})
+    system = [SystemBlock(_static_system_text(), cache=True),
+              SystemBlock(_workspace_state_text(req.state), cache=False)]
+    messages = [_to_msg(m) for m in req.messages]
+    registry = _build_registry()
+    env = ToolEnv(data={'state': req.state})
+    engine = CopilotEngine(AnthropicProvider(api_key=api_key), registry, max_turns=8)
 
-            stream_kwargs = dict(
-                model=req.model, max_tokens=max_tokens,
-                messages=api_messages, system=system, tools=TOOLS,
-                thinking=thinking_param,
-                extra_headers={'anthropic-beta': 'files-api-2025-04-14'})
-            if output_config:
-                stream_kwargs['output_config'] = output_config
+    # per-turn correlation for tool_exec logging: the engine reports tool args
+    # on the AssistantMessage and the artifact/result separately, so we stitch
+    # them back together by tool_call_id to reproduce the old tool_exec record.
+    tool_args_by_id: dict[str, dict] = {}
+    ui_by_id: dict[str, dict] = {}
 
-            async with client.messages.stream(**stream_kwargs) as stream:
-                async for event in stream:
-                    et = getattr(event, 'type', None)
-                    if et == 'text':
-                        yield _sse('text', {'text': event.text})
-                    elif et == 'thinking':
-                        yield _sse('thinking', {'text': getattr(event, 'thinking', '')})
-                    elif et == 'content_block_start':
-                        block = event.content_block
-                        if block.type == 'tool_use':
-                            yield _sse('tool_call_start',
-                                       {'id': block.id, 'name': block.name})
-                final = await stream.get_final_message()
-
-            # Reconstruct full assistant content for the API (thinking blocks
-            # must be carried through tool round-trips); display strips thinking.
-            api_blocks: list[dict] = []
-            display_blocks: list[dict] = []
-            tool_uses: list[tuple[str, str, dict]] = []
-            for block in final.content:
-                bt = block.type
-                if bt == 'text':
-                    blk = {'type': 'text', 'text': block.text}
-                    api_blocks.append(blk); display_blocks.append(blk)
-                elif bt == 'thinking':
-                    api_blocks.append({'type': 'thinking', 'thinking': block.thinking,
-                                       'signature': getattr(block, 'signature', None)})
-                elif bt == 'redacted_thinking':
-                    api_blocks.append({'type': 'redacted_thinking',
-                                       'data': getattr(block, 'data', '')})
-                elif bt == 'tool_use':
-                    blk = {'type': 'tool_use', 'id': block.id,
-                           'name': block.name, 'input': block.input}
-                    api_blocks.append(blk); display_blocks.append(blk)
-                    tool_uses.append((block.id, block.name, block.input))
-            api_messages.append({'role': 'assistant', 'content': api_blocks})
-
-            usage = getattr(final, 'usage', None)
-            log('copilot_response', {
-                'call_index': call_index, 'stop_reason': final.stop_reason,
-                'usage': ({'input_tokens': getattr(usage, 'input_tokens', None),
-                           'output_tokens': getattr(usage, 'output_tokens', None)}
-                          if usage else None),
-                'content_blocks': api_blocks})
-            yield _sse('assistant_msg', {'content': display_blocks})
-
-            if final.stop_reason != 'tool_use' or not tool_uses:
-                yield _sse('done', {'stop_reason': final.stop_reason})
-                finalize_node()
-                _schedule_autoname(sid)
-                return
-
-            tool_result_blocks: list[dict] = []
-            for tool_id, name, args in tool_uses:
-                t0 = time.perf_counter()
-                handler = _TOOL_DISPATCH.get(name)
-                if handler is None:
-                    result = {'error': f'unknown tool: {name}'}
-                    ui = {}
-                else:
-                    try:
-                        result, ui = await handler(args, req.state)
-                    except Exception as exc:
-                        result = {
-                            'ok': False,
-                            'error': f'{type(exc).__name__}: {exc}',
-                            'traceback': traceback.format_exc(),
-                        }
-                        ui = {}
-                if ui:
-                    yield _sse('tool_ui', {'tool_id': tool_id, 'name': name, **ui})
-                yield _sse('tool_result', {
-                    'tool_id': tool_id, 'name': name, 'result': result,
-                })
-                if name == 'propose_edit':
-                    log('proposal', {'tool_id': tool_id,
+    try:
+        async for ev in engine.run(
+                model=req.model, system=system, messages=messages, env=env,
+                effort=effort, max_tokens=max_tokens, log=log):
+            if isinstance(ev, TextDelta):
+                yield _sse('text', {'text': ev.text})
+            elif isinstance(ev, ThinkingDelta):
+                yield _sse('thinking', {'text': ev.text})
+            elif isinstance(ev, ToolCallStarted):
+                yield _sse('tool_call_start', {'id': ev.id, 'name': ev.name})
+            elif isinstance(ev, AssistantMessage):
+                # display strips thinking; carry text + tool_use only (the
+                # engine retains the full parts, incl. thinking, internally).
+                display_blocks: list[dict] = []
+                for p in ev.parts:
+                    if isinstance(p, Text):
+                        display_blocks.append({'type': 'text', 'text': p.text})
+                    elif isinstance(p, ToolCall):
+                        display_blocks.append({'type': 'tool_use', 'id': p.id,
+                                               'name': p.name, 'input': p.input})
+                        tool_args_by_id[p.id] = p.input
+                yield _sse('assistant_msg', {'content': display_blocks})
+            elif isinstance(ev, Artifact):
+                ui_by_id[ev.tool_call_id] = ev.data
+                yield _sse('tool_ui', {'tool_id': ev.tool_call_id,
+                                       'name': ev.tool_name, **ev.data})
+            elif isinstance(ev, ToolResultEvent):
+                yield _sse('tool_result', {'tool_id': ev.tool_call_id,
+                                           'name': ev.name, 'result': ev.result})
+                args = tool_args_by_id.get(ev.tool_call_id, {})
+                if ev.name == 'propose_edit':
+                    log('proposal', {'tool_id': ev.tool_call_id,
                                      'new_code': args.get('new_code', ''),
                                      'summary': args.get('summary', '')})
                 log('tool_exec', {
-                    'tool_id': tool_id, 'name': name, 'args': args,
-                    'result': result, 'ui': _compact_ui_for_log(sid, ui),
-                    'elapsed_s': round(time.perf_counter() - t0, 3)})
-                tool_result_blocks.append({
-                    'type': 'tool_result', 'tool_use_id': tool_id,
-                    'content': json.dumps(result),
-                })
-
-            api_messages.append({'role': 'user', 'content': tool_result_blocks})
-
-        except Exception as exc:
-            yield _sse('error', {
-                'message': f'{type(exc).__name__}: {exc}',
-                'traceback': traceback.format_exc(),
-            })
-            log('error', {'message': f'{type(exc).__name__}: {exc}'})
-            finalize_node()
-            return
-
-    yield _sse('error', {'message': f'tool-use loop exceeded {MAX_TURNS} turns'})
-    finalize_node()
+                    'tool_id': ev.tool_call_id, 'name': ev.name, 'args': args,
+                    'result': ev.result,
+                    'ui': _compact_ui_for_log(sid, ui_by_id.get(ev.tool_call_id, {})),
+                    'elapsed_s': ev.elapsed_s})
+            elif isinstance(ev, Done):
+                yield _sse('done', {'stop_reason': ev.stop_reason})
+                finalize_node()
+                _schedule_autoname(sid)
+                return
+            elif isinstance(ev, ErrorEvent):
+                payload = {'message': ev.message}
+                if ev.detail:
+                    payload['traceback'] = ev.detail
+                yield _sse('error', payload)
+                log('error', {'message': ev.message})
+                finalize_node()
+                return
+    except Exception as exc:  # noqa: BLE001 — defensive: surface anything the
+        # engine didn't already wrap as an ErrorEvent.
+        yield _sse('error', {
+            'message': f'{type(exc).__name__}: {exc}',
+            'traceback': traceback.format_exc(),
+        })
+        log('error', {'message': f'{type(exc).__name__}: {exc}'})
+        finalize_node()
+        return
 
 
 @router.post('/api/chat')
