@@ -187,7 +187,9 @@ class OpenAIProvider:
                 finish_reason = ch.finish_reason
             if delta is None:
                 continue
-            rc = getattr(delta, "reasoning_content", None)
+            # vLLM exposes streamed reasoning under either `reasoning_content`
+            # (older builds) or `reasoning` (newer Qwen3 builds) — accept both.
+            rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if rc:
                 think_buf.append(rc)
                 yield ThinkingDelta(rc)
