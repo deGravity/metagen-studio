@@ -263,7 +263,16 @@ default leaves them unset so the live copilot behaves identically to now.
   (no PDF needed for code tasks).
 - **P3 — PDF preprocessing pipeline** (§4.4): backend interface +
   `pymupdf4llm`/`pdfmux`/`marker`/`vision_ocr`, capability-gated routing, cached
-  ingest. Config-selectable so we can compare techniques.
+  ingest. Config-selectable so we can compare techniques. ✅ **Done** —
+  `copilot/pdf/` (types, `PdfBackend`/`IngestCache` protocols, capability×mode
+  routing, content-addressed cache). Backends: `pymupdf4llm` (core PyMuPDF
+  default, richer markdown if `pymupdf4llm` present), `vision_ocr` (rasterize →
+  injected VLM transcriber), `marker`/`pdfmux`/`docling`/`mineru` as remote
+  services (report unavailable without an `endpoint`). Wired into `chat.py` via
+  an off-event-loop `_prepare_attachments` hook; inline base64 PDFs route per
+  the model's caps, Anthropic Files-API refs bypass untouched. `pymupdf` is the
+  `pdf` optional extra. Process-local ingest cache (session-blob persistence is
+  a noted follow-up).
 - **P4 — Gemini adapter** (native PDF + thinkingBudget + thought summaries).
 - **P5 — headless runner + adapt existing evals.** Wire the BenchmarkRunner over
   `CopilotEngine` with a no-UI `ToolEnv`; **adapt the existing non-agentic

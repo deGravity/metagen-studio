@@ -36,10 +36,11 @@ from . import sessions as _sess
 from .copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
 from .copilot.providers import build_provider
 from .copilot.types import (
-    SystemBlock, Msg, Text, ToolCall, ToolResult, Thinking, Raw, ToolDef,
+    SystemBlock, Msg, Text, Document, ToolCall, ToolResult, Thinking, Raw, ToolDef,
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
     Artifact, Done, ErrorEvent,
 )
+from .copilot import pdf as _pdf
 
 
 def _to_msg(m) -> Msg:
@@ -66,6 +67,16 @@ def _to_msg(m) -> Msg:
             parts.append(Thinking(text=b.get('thinking', ''), signature=b.get('signature')))
         elif t == 'redacted_thinking':
             parts.append(Thinking(redacted=b.get('data', '')))
+        elif t == 'document' and isinstance(b.get('source'), dict) \
+                and b['source'].get('type') == 'base64':
+            # An inline base64 PDF — normalize so the attachment pipeline can
+            # route it per the target model's capabilities. A Files-API ref
+            # (source.type == 'file') is NOT this; it stays Raw below so the
+            # Anthropic-native upload path is untouched.
+            src = b['source']
+            parts.append(Document(data_b64=src.get('data', ''),
+                                  media_type=src.get('media_type', 'application/pdf'),
+                                  name=b.get('title', '') or b.get('name', '')))
         else:
             parts.append(Raw(block=b))
     return Msg(m.role, parts)
@@ -136,6 +147,103 @@ def _resolve_provider(req: ChatRequest):
     except ValueError as exc:
         return None, str(exc)
     return provider, None
+
+
+# Process-local ingest cache: repeated turns in a chat (and benchmark reruns
+# in one process) reuse the extraction. Persisting across processes via the
+# session blob store is a future optimization (§4.4).
+_PDF_CACHE = _pdf.InMemoryIngestCache()
+
+
+def _vision_transcriber():
+    """Build a sync (images, prompt)->markdown transcriber for the vision_ocr
+    backend from config, or None if not configured. Sync on purpose so it runs
+    inside asyncio.to_thread without touching the event loop."""
+    vc = cfg('copilot.pdf.vision_ocr', {}) or {}
+    provider = (vc.get('provider') or 'anthropic').lower()
+    model = vc.get('model')
+    if not model:
+        return None
+    if provider in ('anthropic', 'claude'):
+        key = os.environ.get(cfg('copilot.providers.anthropic.key_env',
+                                 'METAGEN_ANTHROPIC_API_KEY'))
+        if not key:
+            return None
+
+        def transcribe(images, prompt):
+            from anthropic import Anthropic
+            content = [{'type': 'image', 'source': {'type': 'base64',
+                        'media_type': im.media_type, 'data': im.data_b64}}
+                       for im in images]
+            content.append({'type': 'text', 'text': prompt})
+            r = Anthropic(api_key=key).messages.create(
+                model=model, max_tokens=4096,
+                messages=[{'role': 'user', 'content': content}])
+            return ''.join(getattr(b, 'text', '') for b in r.content
+                           if getattr(b, 'type', None) == 'text')
+        return transcribe
+    if provider in ('openai', 'gpt'):
+        key = os.environ.get(cfg('copilot.providers.openai.key_env',
+                                 'METAGEN_OPENAI_KEY'))
+        if not key:
+            return None
+
+        def transcribe(images, prompt):
+            from openai import OpenAI
+            content = [{'type': 'text', 'text': prompt}]
+            for im in images:
+                content.append({'type': 'image_url', 'image_url': {
+                    'url': f'data:{im.media_type};base64,{im.data_b64}'}})
+            r = OpenAI(api_key=key).chat.completions.create(
+                model=model, max_tokens=4096,
+                messages=[{'role': 'user', 'content': content}])
+            return r.choices[0].message.content or ''
+        return transcribe
+    return None
+
+
+def _build_pdf_backend():
+    name = cfg('copilot.pdf.backend', 'pymupdf4llm')
+    endpoint = cfg(f'copilot.pdf.{name}.endpoint', None)
+    transcribe = _vision_transcriber() if name in ('vision_ocr', 'vision') else None
+    return _pdf.build_backend(name, endpoint=endpoint, transcribe=transcribe)
+
+
+def _prepare_attachments(messages: list, provider, model: str) -> list:
+    """Route inline PDF Documents to what `model` can consume. No-op (fast
+    path) when there are no inline PDFs, or when the model takes PDFs natively
+    and config doesn't force a backend — so the Anthropic default is unchanged.
+    Runs the (CPU/network) backend off the event loop via the caller's thread."""
+    has_pdf = any(isinstance(p, Document) and 'pdf' in p.media_type
+                  for m in messages for p in m.parts)
+    if not has_pdf:
+        return messages
+    try:
+        caps = provider.capabilities(model)
+    except Exception:  # noqa: BLE001
+        caps = None
+    force = bool(cfg('copilot.pdf.force_backend', False))
+    if caps is not None and caps.native_pdf and not force:
+        return messages   # native PDF: leave Documents in place
+
+    mode = cfg('copilot.pdf.mode', 'both')
+    dpi = int(cfg('copilot.pdf.image_dpi', 150))
+    max_pages = cfg('copilot.pdf.max_pages', None)
+    backend = _build_pdf_backend()
+    opts = _pdf.IngestOpts(image_dpi=dpi,
+                           max_pages=int(max_pages) if max_pages else None)
+    out = []
+    for m in messages:
+        r = _pdf.prepare_parts(list(m.parts), caps or _pdf_default_caps(),
+                               backend=backend, mode=mode, force_backend=force,
+                               cache=_PDF_CACHE, opts=opts)
+        out.append(Msg(m.role, r.parts))
+    return out
+
+
+def _pdf_default_caps():
+    from .copilot.types import Capabilities
+    return Capabilities(native_pdf=False, native_images=False)
 
 
 def _turn_label(req: ChatRequest) -> str:
@@ -644,6 +752,14 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
     system = [SystemBlock(_static_system_text(), cache=True),
               SystemBlock(_workspace_state_text(req.state), cache=False)]
     messages = [_to_msg(m) for m in req.messages]
+    # Route inline PDF attachments to what this model can consume (no-op for
+    # native-PDF models / no attachments). Runs the extractor off the event
+    # loop so a slow ingest doesn't stall the SSE stream.
+    try:
+        messages = await asyncio.to_thread(
+            _prepare_attachments, messages, provider, req.model)
+    except Exception as exc:  # noqa: BLE001 — never let ingest break the chat
+        log('error', {'message': f'attachment preprocessing failed: {exc}'})
     registry = _build_registry()
     env = ToolEnv(data={'state': req.state})
     engine = CopilotEngine(provider, registry, max_turns=8)

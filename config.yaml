@@ -51,3 +51,19 @@ copilot:
     model: claude-haiku-4-5-20251001
     every_turns: 5
     idle_seconds: 60
+  # PDF / attachment preprocessing. Inline PDFs are routed to what the target
+  # model can consume: native-PDF models (Claude/GPT/Gemini) get the PDF as-is
+  # (set force_backend: true to instead A/B our extraction); vision models get
+  # page images (+text); text-only models get extracted markdown, never images.
+  # Files-API uploads (Anthropic) bypass this pipeline and are unaffected.
+  pdf:
+    backend: pymupdf4llm   # pymupdf4llm | vision_ocr | marker | pdfmux | docling | mineru
+    mode: both             # text_only | images | both (gated by model caps)
+    force_backend: false   # true → extract even when the model takes PDF natively
+    image_dpi: 150
+    # max_pages: 50        # cap pages processed (omit = all)
+    vision_ocr:            # used only when backend: vision_ocr
+      provider: anthropic  # anthropic | openai (a vision-capable model)
+      # model: claude-haiku-4-5-20251001
+    # marker:  { endpoint: http://<gpu-host>:8xxx/ingest }  # remote GPU service
+    # pdfmux:  { endpoint: http://<gpu-host>:8xxx/ingest }

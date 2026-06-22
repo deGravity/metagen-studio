@@ -20,6 +20,12 @@ dependencies = [
     "metagen-simulator>=0.1.0",
 ]
 
+[project.optional-dependencies]
+# PDF attachment preprocessing (copilot.pdf). pymupdf is the lightweight,
+# no-ML default backend; marker/docling/mineru are heavy/GPU and run as a
+# remote service (copilot.pdf.<backend>.endpoint), not installed here.
+pdf = ["pymupdf>=1.24"]
+
 [project.scripts]
 # `conda install metagen-studio && metagen-studio` launches the packaged
 # studio (single uvicorn process serving the bundled SPA + /api routes).
