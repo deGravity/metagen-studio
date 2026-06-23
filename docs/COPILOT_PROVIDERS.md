@@ -131,9 +131,12 @@ class Tool:
 ```
 - `ToolEnv` carries the *environment* (compiled program, kernel runner, session
   id) — **not** the transport. The studio binds `run_geometry`/`run_simulation`/
-  `propose_edit` to kernel_job + emits `artifact` events; a CAD plugin binds the
-  same names to its own geometry engine; the benchmark runner binds them to a
-  headless kernel with no UI emission. **Same engine, different `ToolEnv`.**
+  `propose_edit` to kernel_job + emits `artifact` events; the benchmark runner
+  binds the same names to a headless kernel with no UI emission; a CAD plugin
+  **keeps those kernel-backed tools** (the DSL→kernel pipeline is never swapped
+  out) and **adds** host integration tools (e.g. `place_in_part`, `boolean_into`)
+  bound to its CAD API — see P6. **Same engine + same kernel tools, different
+  `ToolEnv` (and, for hosts, extra tools).**
 
 ### 4.4 PDF / attachment preprocessing pipeline (`copilot/pdf/`)
 A **pluggable** pipeline (not one extractor), so we can A/B techniques per the
@@ -302,8 +305,50 @@ default leaves them unset so the live copilot behaves identically to now.
   (temp/seed not yet plumbed through `engine.run`; repeats handle variance);
   `material_understanding` needs an LLM judge (free-text, not auto-graded);
   reconstruction needs kernel voxel export.
-- **P6 — embedding boundary doc + example** (CAD-plugin-style host that supplies
-  its own `ToolEnv`).
+- **P6 — embedding boundary doc + example** (host that drives the copilot from
+  *its* front-end and feeds the kernel's geometry into *its* CAD context). The
+  DSL + `metagen_kernel` are **fundamental and stay** — embedding never swaps
+  the geometry engine out; it adds a host transport + host-specific tools around
+  the unchanged kernel-backed copilot. The seam (`ToolEnv` + `ToolRegistry` +
+  the normalized `Event` stream) supports **two tool classes at once**:
+    1. *fixed kernel tools* — `propose_edit` / `run_geometry` / `run_simulation`,
+       always bound to the real DSL→kernel pipeline; and
+    2. *host integration tools* the embedder adds — e.g. `place_in_part`,
+       `boolean_into`, `pattern`, `read_part_context` — bound to the host CAD
+       API. Same engine, **kernel tools plus host tools**, not instead of.
+
+  **Worked example — an Onshape application extension.** A chat panel in the
+  Onshape app talks to a backend hosting the `CopilotEngine`; the copilot
+  authors metaDSL and runs the **real kernel** to generate the unit-cell
+  geometry; host tools then import that geometry into the active document and
+  compose it into a larger part (repeat/pattern + boolean against a target
+  body) via Onshape's REST/FeatureScript API:
+
+  ```
+  Onshape app panel (chat UI)
+        │  prompt ▲ streamed Events ▼
+  backend hosting CopilotEngine ─► metagen_dsl → metagen_kernel  (REAL geometry — unchanged)
+        │  run_geometry/run_simulation iterate           │ mesh / solid artifact
+        ▼  host tools                                     │
+  import_into_document(geo) · pattern(n×n×n) · boolean_into(target)  ── via Onshape API
+        ▼
+  metamaterial incorporated into the larger Onshape part
+  ```
+
+  **Deliverables:** (a) a ~100-line example host that uses the real kernel for
+  geometry and adds *stubbed* `place_in_part`/`boolean_into` tools (stubbed only
+  because there's no live Onshape here — the geometry handed off is genuine
+  kernel output), consuming the `Event` stream directly (no FastAPI/SSE); (b) a
+  boundary doc covering the two tool classes, the **geometry artifact contract**
+  (what format the host receives), the transport, and optional surrounding-part
+  context as engine input.
+
+  **Open design question this surfaces:** CAD composition wants a solid/B-rep or
+  a clean watertight mesh, and likely awareness of the host part (size,
+  placement, the body to boolean into). Today `run_geometry`'s artifact is a
+  triangle mesh + voxels — so a STEP/solid export path from the kernel (and a
+  way to pass part context into the engine) is a likely follow-up the embedding
+  use-case drives, distinct from the studio's needs.
 - **P7 — extract `metagen-copilot` as its own package/repo** (likely shipped
   with the backend server). Mechanical once P1's boundary holds: bump `copilot/`
   to a package with its own `pyproject`, studio depends on it. See §9.
@@ -343,7 +388,9 @@ than a rewrite, P1 enforces a hard dependency boundary:
 - **The engine imports nothing studio-specific.** It depends only on injected
   interfaces, not concrete studio code:
   - `ToolEnv` — the host supplies geometry/sim runners, compiled-program access,
-    etc. (studio binds kernel_job; CAD binds its engine; benchmark binds headless).
+    etc. (studio binds kernel_job; benchmark binds a headless kernel; a CAD host
+    binds the *same* kernel runners and adds its own CAD-integration tools — the
+    kernel is shared, not replaced).
   - `TranscriptStore` (protocol) — append events / read transcript. The studio's
     `sessions.py` becomes *one implementation*; a CAD host or benchmark can pass
     an in-memory or different store. The engine never imports `sessions` directly.
