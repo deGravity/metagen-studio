@@ -11,7 +11,11 @@ interface Props {
   state: ChatStateContext;
   available: boolean;
   sessionId?: string;
+  ensureSession?: () => Promise<string | null>;
   thinking?: boolean;
+  provider?: string;
+  model?: string;
+  chatCreds?: { api_key?: string; base_url?: string };
   // Bumped by the host to request a chat rehydrate (session switch / restore /
   // checkout); restoreNode picks the conversation prefix (undefined = HEAD).
   restoreToken?: number;
@@ -254,8 +258,12 @@ export function ChatPanel(props: Props) {
       ];
       let liveText = '';
       let liveThinking = '';
+      // lazily create the session on the first chat turn (if none yet)
+      const sid = (await props.ensureSession?.()) ?? props.sessionId;
       for await (const ev of streamChat(apiMessages, props.state, ctl.signal,
-          'claude-opus-4-7', { thinking: props.thinking, session_id: props.sessionId })) {
+          props.model ?? 'claude-opus-4-7',
+          { thinking: props.thinking, session_id: sid,
+            provider: props.provider, ...(props.chatCreds ?? {}) })) {
         if (ev.kind === 'thinking') {
           liveThinking += ev.text;
           setTurns((t) => {

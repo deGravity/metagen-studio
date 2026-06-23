@@ -112,3 +112,22 @@ export interface MeshData {
   vertices: Float32Array;
   triangles: Uint32Array;
 }
+
+export interface ProviderInfo {
+  name: string;            // anthropic | openai | gemini | vllm
+  label: string;
+  available: boolean;      // backend-side (env key / configured base_url)
+  needs: string;           // env var name or 'base_url'
+  needs_base_url: boolean;
+  key_env: string | null;
+  models: string[];        // curated quick-pick models
+  default_model: string | null;
+  discover?: boolean;      // models are discovered live (vLLM) not curated
+  base_url?: string | null; // server-configured base_url, if any
+}
+
+// Browser-local credential overrides (localStorage; sent per request, never
+// persisted server-side). Per provider: an api_key and/or a base_url (vLLM).
+export interface LlmCreds {
+  [provider: string]: { api_key?: string; base_url?: string };
+}

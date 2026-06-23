@@ -735,3 +735,48 @@ code {
 .cr-actions button.danger { color: #ff9d9d; border-color: #5a2a2a; }
 .cr-actions button:disabled { opacity: .5; cursor: default; }
 .cleanup-empty { padding: 16px; color: #666; font-style: italic; }
+
+/* LLM provider/model selector (chat header) */
+.llm-selector { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.llm-selector select {
+  background: #15171b; color: #cdd3da; border: 1px solid #2a2d33;
+  border-radius: 3px; font-size: 10px; padding: 2px 4px; max-width: 150px; cursor: pointer;
+}
+.llm-selector select:hover { border-color: #4a90e2; }
+.llm-gear {
+  background: none; border: none; color: #7e8794; cursor: pointer;
+  font-size: 13px; padding: 0 2px; line-height: 1;
+}
+.llm-gear:hover { color: #cdd3da; }
+
+/* LLM settings modal */
+.llm-settings { width: 540px; padding: 14px 16px; overflow-y: auto; gap: 0; }
+.llm-settings h3 { margin: 0 0 6px; font-size: 14px; }
+.llm-note { font-size: 11px; color: #8a93a0; margin: 0 0 12px; line-height: 1.4; }
+.llm-prov-block { border-top: 1px solid #24262b; padding: 10px 0; }
+.llm-prov-head { display: flex; justify-content: space-between; align-items: baseline; }
+.llm-prov-head .llm-ok { font-size: 10px; color: #5fb37a; }
+.llm-prov-head .llm-warn { font-size: 10px; color: #c8a04a; }
+.llm-field { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9ab; margin-top: 6px; }
+.llm-field input {
+  background: #0f1114; color: #cdd3da; border: 1px solid #2a2d33;
+  border-radius: 3px; padding: 4px 6px; font-size: 12px; font-family: ui-monospace, Menlo, monospace;
+}
+.llm-models { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+.llm-models-label { font-size: 10px; color: #7e8794; }
+.llm-chip {
+  background: #1d2026; border: 1px solid #2a2d33; border-radius: 10px;
+  padding: 1px 4px 1px 8px; font-size: 10.5px; color: #cdd3da; display: inline-flex; align-items: center; gap: 2px;
+}
+.llm-chip button { background: none; border: none; color: #8a93a0; cursor: pointer; font-size: 12px; padding: 0 2px; }
+.llm-models input {
+  background: #0f1114; color: #cdd3da; border: 1px solid #2a2d33;
+  border-radius: 3px; padding: 2px 6px; font-size: 11px; width: 130px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.modal-actions button {
+  background: #1d1d1d; border: 1px solid #2c2c2c; color: #bbb;
+  border-radius: 3px; padding: 5px 12px; cursor: pointer; font-size: 12px;
+}
+.modal-actions button.primary { background: #2a5a9a; border-color: #2a5a9a; color: #fff; }
+.modal-actions button:hover { border-color: #4a90e2; }

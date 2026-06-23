@@ -6,15 +6,22 @@ import { ResultsPanel } from './components/Results';
 import { ChatPanel } from './components/Chat';
 import { SessionBar } from './components/SessionBar';
 import { CleanupModal } from './components/CleanupModal';
+import { LlmSelector } from './components/LlmSelector';
 import {
   simulate, getInfo, decodeMesh, streamExecute, cancelJob, getCachedResults,
   createSession, listSessions, getSession, renameSession, getNode, logSessionEvent,
+  getProviders,
 } from './api';
 import type { SessionInfo, NodeRestore } from './api';
 import type {
   ExecuteResponse, SimulateResponse, InfoResponse,
-  TpmsMode, SimBackend, MeshData, ChatStateContext,
+  TpmsMode, SimBackend, MeshData, ChatStateContext, ProviderInfo, LlmCreds,
 } from './types';
+import {
+  Selection, loadCreds, loadCustomModels, loadSelection, saveSelection, credsToSend,
+  baseUrlFor,
+} from './llm';
+import { discoverModels } from './api';
 
 const LS_SESSION = 'studio.sessionId';
 
@@ -67,14 +74,75 @@ export default function App() {
   const jobIdRef = useRef<string | null>(null);
   // sessions
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionName, setSessionName] = useState('Untitled session');
-  const [sessionNameSource, setSessionNameSource] = useState('auto');
+  const [sessionName, setSessionName] = useState('New session');
+  const [sessionNameSource, setSessionNameSource] = useState('none');
+  // mirror sessionId in a ref so ensureSession() sees the latest value across
+  // concurrent async callers (state updates lag).
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  const creatingRef = useRef<Promise<string | null> | null>(null);
   // bump to ask ChatPanel to rehydrate the transcript; node = which prefix
   // (undefined = HEAD). Reset on session switch, set to the node on checkout.
   const [chatRestore, setChatRestore] = useState<{ token: number; node?: string }>({ token: 0 });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [thinking, setThinking] = useState(true);
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  // LLM provider/model selection (per-session, persisted in localStorage)
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [llmCreds, setLlmCreds] = useState<LlmCreds>(() => loadCreds());
+  const [customModels, setCustomModels] = useState<Record<string, string[]>>(() => loadCustomModels());
+  const [discovered, setDiscovered] = useState<Record<string, string[]>>({});
+  const [discErr, setDiscErr] = useState<Record<string, string>>({});
+  const [llmSel, setLlmSel] = useState<Selection>({ provider: 'anthropic', model: 'claude-opus-4-7' });
+
+  // fetch provider availability once; seed the default selection
+  useEffect(() => {
+    getProviders().then(({ providers: ps, default_provider }) => {
+      setProviders(ps);
+      setLlmSel((cur) => {
+        if (cur.model) return cur;   // already set (e.g. from a session)
+        const p = ps.find((x) => x.name === default_provider) || ps[0];
+        return p ? { provider: p.name, model: p.default_model || cur.model } : cur;
+      });
+    }).catch(() => {});
+  }, []);
+
+  function selectLlm(sel: Selection) {
+    setLlmSel(sel);
+    saveSelection(sessionId ?? undefined, sel);
+  }
+
+  // discover models for one provider; capture any error so the UI can show
+  // *why* the list is empty instead of an opaque "no models".
+  async function runDiscovery(p: ProviderInfo) {
+    const base = baseUrlFor(p, llmCreds);
+    if (!base) { setDiscErr((e) => ({ ...e, [p.name]: 'no base URL configured' })); return; }
+    try {
+      const r = await discoverModels(p.name, base, llmCreds[p.name]?.api_key);
+      setDiscovered((d) => ({ ...d, [p.name]: r.models || [] }));
+      setDiscErr((e) => ({ ...e, [p.name]: r.error || (r.models?.length ? '' : 'server returned no models') }));
+    } catch (err: any) {
+      setDiscErr((e) => ({ ...e, [p.name]: `request failed: ${err?.message || err}` }));
+    }
+  }
+
+  // live-discover models for discoverable providers (vLLM) whenever the set of
+  // providers or the stored creds/base_url change (and on provider switch).
+  useEffect(() => {
+    for (const p of providers) if (p.discover) runDiscovery(p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers, llmCreds, llmSel.provider]);
+
+  // For a discovery provider (vLLM), the selectable models come only from the
+  // live list — so if the current selection holds a stale/profile-key model
+  // (e.g. 'qwen3.6' from config or an old session), snap it to a real served id.
+  useEffect(() => {
+    const p = providers.find((x) => x.name === llmSel.provider);
+    if (!p?.discover) return;
+    const disc = discovered[llmSel.provider] || [];
+    if (disc.length && !disc.includes(llmSel.model)) selectLlm({ provider: llmSel.provider, model: disc[0] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discovered, llmSel.provider, providers]);
 
   // refresh current session name/source + the picker list (e.g. after auto-naming)
   async function refreshSessionMeta() {
@@ -111,39 +179,51 @@ export default function App() {
     localStorage.setItem(LS_SESSION, tree.session_id);
     // rehydrate chat at HEAD for the adopted session (clears any stale node)
     setChatRestore((s) => ({ token: s.token + 1, node: undefined }));
+    // restore this session's saved provider/model choice, if any
+    const savedSel = loadSelection(tree.session_id);
+    if (savedSel) setLlmSel(savedSel);
     listSessions().then(setSessions).catch(() => {});
   }
 
-  // init: resume stored session or create a new one (guard StrictMode double-run)
-  const sessionInitRef = useRef(false);
+  // init: NO session is created on load — a page load is a clean, unsaved slate.
+  // A session is created lazily on the first real action (edit / run / sim /
+  // chat) via ensureSession(). Prior sessions live on the server and are
+  // reachable from the picker. We just load the picker list here.
   useEffect(() => {
-    if (sessionInitRef.current) return;
-    sessionInitRef.current = true;
-    (async () => {
-      const stored = localStorage.getItem(LS_SESSION);
-      if (stored) {
-        try {
-          const tree = await getSession(stored);
-          await adoptSession(tree);
-          // restore HEAD state if it carries a snapshot
-          const head = tree.nodes[tree.head];
-          if (head?.snapshot?.code != null) {
-            const r = await getNode(stored, tree.head);
-            applyRestore(r);
-          }
-          return;
-        } catch { /* stored session gone — fall through to create */ }
-      }
-      try { await adoptSession(await createSession('claude-opus-4-7')); } catch (e: any) { setError(`session init: ${e.message}`); }
-    })();
+    listSessions().then(setSessions).catch(() => {});
   }, []);
 
-  async function newSession() {
-    try {
-      const tree = await createSession('claude-opus-4-7');
-      await adoptSession(tree);
-      setGeometry(null); setSim(null); setMesh(null);
-    } catch (e: any) { setError(`new session: ${e.message}`); }
+  // Create-and-adopt a session iff none exists yet; idempotent + race-safe.
+  // Returns the session id (or null on failure). Callers that log to a session
+  // must await this and use the returned id (state updates lag).
+  async function ensureSession(): Promise<string | null> {
+    if (sessionIdRef.current) return sessionIdRef.current;
+    if (creatingRef.current) return creatingRef.current;
+    const p = (async () => {
+      try {
+        const tree = await createSession('claude-opus-4-7');
+        sessionIdRef.current = tree.session_id;   // visible to concurrent callers now
+        await adoptSession(tree);
+        return tree.session_id;
+      } catch (e: any) {
+        setError(`session: ${e.message}`);
+        return null;
+      } finally {
+        creatingRef.current = null;
+      }
+    })();
+    creatingRef.current = p;
+    return p;
+  }
+
+  // "New session" = back to an unsaved clean slate (no server session until the
+  // next real action). Old sessions remain in the picker.
+  function newSession() {
+    sessionIdRef.current = null;
+    setSessionId(null);
+    setSessionName('New session'); setSessionNameSource('none');
+    setCode(DEFAULT_CODE); setGeometry(null); setSim(null); setMesh(null);
+    setChatRestore((s) => ({ token: s.token + 1, node: undefined }));   // clears chat
   }
 
   async function pickSession(id: string) {
@@ -152,7 +232,7 @@ export default function App() {
       await adoptSession(tree);
       const head = tree.nodes[tree.head];
       if (head?.snapshot?.code != null) applyRestore(await getNode(id, tree.head));
-      else { setGeometry(null); setSim(null); setMesh(null); }
+      else { setCode(DEFAULT_CODE); setGeometry(null); setSim(null); setMesh(null); }
     } catch (e: any) { setError(`open session: ${e.message}`); }
   }
 
@@ -212,8 +292,9 @@ export default function App() {
   async function runGeometry() {
     setBusy(true); setError(null); setProgress({ phase: 'starting' });
     jobIdRef.current = null;
+    const sid = await ensureSession();
     try {
-      for await (const ev of streamExecute(code, resolution, tpmsMode, undefined, sessionId ?? undefined)) {
+      for await (const ev of streamExecute(code, resolution, tpmsMode, undefined, sid ?? undefined)) {
         if (ev.kind === 'job') {
           jobIdRef.current = ev.job_id;
         } else if (ev.kind === 'progress') {
@@ -240,8 +321,9 @@ export default function App() {
 
   async function runSim() {
     setBusy(true); setError(null);
+    const sid = await ensureSession();
     try {
-      const r = await simulate(code, resolution, tpmsMode, simBackend, 1.0, 0.45, sessionId ?? undefined);
+      const r = await simulate(code, resolution, tpmsMode, simBackend, 1.0, 0.45, sid ?? undefined);
       setSim(r);
     } catch (e: any) {
       setError(e.message ?? String(e));
@@ -369,13 +451,20 @@ export default function App() {
       <div className="layout">
         <div className="pane editor-pane">
           <div className="editor-wrap">
-            <CodeEditor value={code} onChange={setCode} />
+            <CodeEditor value={code} onChange={(v) => { setCode(v); if (!sessionIdRef.current) ensureSession(); }} />
           </div>
           <div className="vsplit" onMouseDown={startChatDrag}
                title="drag to resize the copilot panel" />
           <div className="chat-dock" style={{ height: chatHeight }}>
             <div className="chat-dock-title">
               Copilot
+              {providers.length > 0 && (
+                <LlmSelector providers={providers} creds={llmCreds} setCreds={setLlmCreds}
+                             customModels={customModels} setCustomModels={setCustomModels}
+                             discovered={discovered} discErr={discErr} selection={llmSel}
+                             onSelect={selectLlm}
+                             onRefresh={(name) => { const p = providers.find((x) => x.name === name); if (p) runDiscovery(p); }} />
+              )}
               <label className="think-toggle" title="extended thinking (chain-of-thought)">
                 <input type="checkbox" checked={thinking}
                        onChange={(e) => setThinking(e.target.checked)} />
@@ -386,7 +475,11 @@ export default function App() {
               state={chatState}
               available={info?.chat_available ?? false}
               sessionId={sessionId ?? undefined}
+              ensureSession={ensureSession}
               thinking={thinking}
+              provider={llmSel.provider}
+              model={llmSel.model}
+              chatCreds={credsToSend(llmSel.provider, providers, llmCreds)}
               restoreToken={chatRestore.token}
               restoreNode={chatRestore.node}
               onApplyProposal={applyProposal}

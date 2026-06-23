@@ -99,6 +99,17 @@ export async function getTranscript(id: string, node?: string): Promise<any[]> {
   const q = node ? `?node=${encodeURIComponent(node)}` : '';
   return (await getJson<{ turns: any[] }>(`/sessions/${id}/transcript${q}`)).turns;
 }
+
+import type { ProviderInfo } from './types';
+export async function getProviders(): Promise<{ providers: ProviderInfo[]; default_provider: string }> {
+  return getJson('/providers');
+}
+// Live-discover models an OpenAI-compatible server (vLLM) is serving.
+export async function discoverModels(
+  provider: string, base_url?: string, api_key?: string,
+): Promise<{ models: string[]; error?: string }> {
+  return postJson('/provider-models', { provider, base_url, api_key });
+}
 export async function logSessionEvent(
   id: string, type: string, payload: any,
   node?: { kind: string; label: string; snapshot: any },
@@ -248,13 +259,16 @@ export async function* streamChat(
   messages: ChatMessage[], state: ChatStateContext,
   signal?: AbortSignal,
   model = 'claude-opus-4-7',
-  opts?: { thinking?: boolean; session_id?: string },
+  opts?: { thinking?: boolean; session_id?: string; provider?: string;
+           api_key?: string; base_url?: string },
 ): AsyncGenerator<ChatEvent> {
   const r = await fetch(`${API}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages, state, model,
-                           thinking: opts?.thinking, session_id: opts?.session_id }),
+                           thinking: opts?.thinking, session_id: opts?.session_id,
+                           provider: opts?.provider,
+                           api_key: opts?.api_key, base_url: opts?.base_url }),
     signal,
   });
   if (!r.ok) {
