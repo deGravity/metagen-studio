@@ -92,6 +92,13 @@ class ChatStateContext(BaseModel):
     last_error: Optional[str] = None
 
 
+class ProviderModelsRequest(BaseModel):
+    """Discover models an OpenAI-compatible server (vLLM) is serving."""
+    provider: str = 'vllm'
+    base_url: Optional[str] = None     # client-supplied; falls back to config
+    api_key: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     state: ChatStateContext
@@ -100,6 +107,10 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None       # log to this session if set
     thinking: Optional[bool] = None        # None = use config default
     provider: Optional[str] = None         # None = config default / infer from model
+    # Client-supplied credential overrides (from the browser's advanced settings,
+    # stored only in localStorage there). Never persisted to the session log.
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 # --- sessions -----------------------------------------------------------

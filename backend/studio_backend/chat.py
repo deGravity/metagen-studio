@@ -29,7 +29,7 @@ from fastapi.responses import StreamingResponse
 
 from metagen_dsl.docs import render_llm as _render_dsl_docs
 
-from .models import ChatRequest, ChatStateContext
+from .models import ChatRequest, ChatStateContext, ProviderModelsRequest
 from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
@@ -121,24 +121,29 @@ def _resolve_provider(req: ChatRequest):
     """Pick + build the provider for this request. Returns (provider, error):
     on success error is None; on a config/credential problem provider is None
     and error is a user-facing message. Defaults reproduce the previous
-    Anthropic-only behavior exactly (METAGEN_ANTHROPIC_API_KEY gate)."""
+    Anthropic-only behavior exactly (METAGEN_ANTHROPIC_API_KEY gate).
+
+    Per-request `api_key` / `base_url` (supplied by the browser's advanced
+    settings, stored only in localStorage there) override the backend env/config
+    so a user can bring their own credentials without a server-side secret."""
     name = (req.provider or cfg('copilot.provider', None)
             or _infer_provider(req.model)).lower()
     pcfg = cfg(f'copilot.providers.{name}', {}) or {}
     key_env = pcfg.get('key_env') or (
         'METAGEN_ANTHROPIC_API_KEY' if name in ('anthropic', 'claude') else None)
-    api_key = os.environ.get(key_env) if key_env else None
-    base_url = pcfg.get('base_url')
+    api_key = getattr(req, 'api_key', None) or (os.environ.get(key_env) if key_env else None)
+    base_url = getattr(req, 'base_url', None) or pcfg.get('base_url')
     mode = pcfg.get('mode')
     profile = (pcfg.get('models') or {}).get(req.model, {}) or {}
 
     is_local = name in ('vllm', 'openai-compat', 'openai_compat', 'chat_completions')
     if is_local:
         if not base_url:
-            return None, (f"provider '{name}' has no base_url configured "
-                          f"(set copilot.providers.{name}.base_url)")
+            return None, (f"provider '{name}' has no base_url — set one in the "
+                          f"advanced settings, or copilot.providers.{name}.base_url")
     elif not api_key:
-        return None, (f'{key_env} not set on backend' if key_env
+        return None, (f'no API key for {name}: set {key_env} on the backend or '
+                      f'add a key in advanced settings' if key_env
                       else f"no API key configured for provider '{name}'")
 
     try:
@@ -147,6 +152,61 @@ def _resolve_provider(req: ChatRequest):
     except ValueError as exc:
         return None, str(exc)
     return provider, None
+
+
+# canonical provider order for the UI + which need a base_url vs a key
+_UI_PROVIDERS = [
+    ('anthropic', 'Anthropic', False),
+    ('openai', 'OpenAI', False),
+    ('gemini', 'Gemini', False),
+    ('vllm', 'vLLM (local/open)', True),
+]
+
+
+def provider_status() -> list[dict]:
+    """Per-provider availability + curated models for the UI selector. Reports
+    what the *backend* has (env key / configured base_url); the frontend merges
+    in any browser-local credentials on top of this."""
+    out = []
+    for name, label, needs_base_url in _UI_PROVIDERS:
+        pcfg = cfg(f'copilot.providers.{name}', {}) or {}
+        key_env = pcfg.get('key_env')
+        has_key = bool(os.environ.get(key_env)) if key_env else False
+        base_url = pcfg.get('base_url')
+        if needs_base_url:
+            available = bool(base_url)
+            need = 'base_url'
+        else:
+            available = has_key
+            need = key_env or 'api_key'
+        # For discovery providers (vLLM) the `models` map holds capability
+        # profiles keyed by short names (qwen3.6) — those are NOT valid model
+        # ids to send, so don't surface them; the UI fills the list from
+        # {base_url}/v1/models. Other providers use their curated model_options.
+        if needs_base_url:
+            models: list = []
+        else:
+            models = pcfg.get('model_options') or list((pcfg.get('models') or {}).keys())
+        out.append({'name': name, 'label': label, 'available': available,
+                    'needs': need, 'needs_base_url': needs_base_url,
+                    'key_env': key_env, 'models': models,
+                    'default_model': models[0] if models else None,
+                    'discover': needs_base_url, 'base_url': base_url})
+    return out
+
+
+async def discover_models(base_url: str, api_key: Optional[str] = None) -> dict:
+    """List the models an OpenAI-compatible server (vLLM) is currently serving,
+    via {base_url}/v1/models. Returns {models:[ids]} or {models:[], error:...}."""
+    if not base_url:
+        return {'models': [], 'error': 'no base_url'}
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key or 'EMPTY', base_url=base_url)
+        resp = await client.models.list()
+        return {'models': sorted(m.id for m in resp.data)}
+    except Exception as exc:  # noqa: BLE001
+        return {'models': [], 'error': f'{type(exc).__name__}: {exc}'}
 
 
 # Process-local ingest cache: repeated turns in a chat (and benchmark reruns
@@ -831,6 +891,23 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
         log('error', {'message': f'{type(exc).__name__}: {exc}'})
         finalize_node()
         return
+
+
+@router.get('/api/providers')
+def providers_endpoint():
+    """Provider availability + curated models for the UI selector. Includes the
+    resolved default provider so the UI can preselect it."""
+    return {'providers': provider_status(),
+            'default_provider': (cfg('copilot.provider', None) or 'anthropic')}
+
+
+@router.post('/api/provider-models')
+async def provider_models_endpoint(req: ProviderModelsRequest):
+    """Live-discover the models an OpenAI-compatible server is serving. The
+    base_url/api_key may be client-supplied (advanced settings); if base_url is
+    omitted we fall back to the provider's configured base_url."""
+    base_url = req.base_url or cfg(f'copilot.providers.{req.provider}.base_url', None)
+    return await discover_models(base_url, req.api_key)
 
 
 @router.post('/api/chat')

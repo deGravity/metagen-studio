@@ -21,13 +21,18 @@ copilot:
   # provider is inferred from the model name (claude*->anthropic, gpt*/o[134]*
   # ->openai, gemini*->gemini).
   provider: anthropic
+  # `model_options` per provider feed the UI's quick model dropdown; the first
+  # is the default for that provider. Users can add more via the advanced panel.
   providers:
     anthropic:
       key_env: METAGEN_ANTHROPIC_API_KEY
+      model_options: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-20251001]
     openai:                       # OpenAI Responses API (GPT-5.x)
       key_env: METAGEN_OPENAI_KEY
+      model_options: [gpt-5, gpt-5-mini]
     gemini:                       # Google Gemini (generateContent)
       key_env: METAGEN_GOOGLE_KEY
+      model_options: [gemini-2.5-pro, gemini-2.5-flash]
     vllm:                         # OpenAI-compatible Chat Completions (vLLM)
       # base_url: http://<vllm-host>:8000/v1
       key_env: METAGEN_VLLM_KEY   # often a dummy ("EMPTY") for local servers
