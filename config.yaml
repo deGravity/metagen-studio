@@ -26,6 +26,8 @@ copilot:
       key_env: METAGEN_ANTHROPIC_API_KEY
     openai:                       # OpenAI Responses API (GPT-5.x)
       key_env: METAGEN_OPENAI_KEY
+    gemini:                       # Google Gemini (generateContent)
+      key_env: METAGEN_GOOGLE_KEY
     vllm:                         # OpenAI-compatible Chat Completions (vLLM)
       # base_url: http://<vllm-host>:8000/v1
       key_env: METAGEN_VLLM_KEY   # often a dummy ("EMPTY") for local servers

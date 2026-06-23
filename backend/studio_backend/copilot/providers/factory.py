@@ -11,6 +11,7 @@ from typing import Optional
 
 from .anthropic import AnthropicProvider
 from .base import Provider
+from .gemini import GeminiProvider
 from .openai import OpenAIProvider
 
 # aliases → canonical kind
@@ -19,6 +20,7 @@ _ALIASES = {
     "openai": "openai", "gpt": "openai", "responses": "openai",
     "vllm": "vllm", "openai-compat": "vllm", "openai_compat": "vllm",
     "chat_completions": "vllm",
+    "gemini": "gemini", "google": "gemini",
 }
 
 
@@ -34,4 +36,6 @@ def build_provider(kind: str, *, api_key: Optional[str] = None,
     if canon == "vllm":
         return OpenAIProvider(api_key=api_key, base_url=base_url,
                               mode=mode or "chat_completions", profile=profile)
+    if canon == "gemini":
+        return GeminiProvider(api_key=api_key)
     raise ValueError(f"unknown provider kind: {kind!r}")

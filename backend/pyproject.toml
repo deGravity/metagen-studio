@@ -25,6 +25,9 @@ dependencies = [
 # no-ML default backend; marker/docling/mineru are heavy/GPU and run as a
 # remote service (copilot.pdf.<backend>.endpoint), not installed here.
 pdf = ["pymupdf>=1.24"]
+# Google Gemini provider (copilot.provider: gemini). Lazily imported, so the
+# studio runs without it unless Gemini is selected.
+gemini = ["google-genai>=1.0"]
 
 [project.scripts]
 # `conda install metagen-studio && metagen-studio` launches the packaged

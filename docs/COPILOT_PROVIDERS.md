@@ -274,6 +274,16 @@ default leaves them unset so the live copilot behaves identically to now.
   `pdf` optional extra. Process-local ingest cache (session-blob persistence is
   a noted follow-up).
 - **P4 — Gemini adapter** (native PDF + thinkingBudget + thought summaries).
+  ✅ **Done** — `providers/gemini.py` over `google-genai` aio streaming:
+  SystemBlock→`system_instruction`, Msg→Content (user/model roles, tool results
+  as `function_response` with the name recovered from the prior tool_call_id,
+  native PDF/image via `Part.from_bytes`), ToolDef→`FunctionDeclaration`,
+  effort→`ThinkingConfig(include_thoughts, thinking_budget)`. Streams text +
+  thought-summary + function-call parts as normalized Events; reconstructs the
+  assistant turn carrying a verbatim Gemini Content (Raw part) so
+  `thought_signature`s round-trip on multi-step tool calling (same pattern as
+  OpenAI Responses' encrypted-reasoning replay). SDK lazily imported (graceful
+  without it); `gemini` optional extra; registered in the factory + config.
 - **P5 — headless runner + adapt existing evals.** Wire the BenchmarkRunner over
   `CopilotEngine` with a no-UI `ToolEnv`; **adapt the existing non-agentic
   codegen eval suites first** (lower lift) before authoring a new agentic suite.
