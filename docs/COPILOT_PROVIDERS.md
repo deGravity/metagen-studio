@@ -288,6 +288,20 @@ default leaves them unset so the live copilot behaves identically to now.
   `CopilotEngine` with a no-UI `ToolEnv`; **adapt the existing non-agentic
   codegen eval suites first** (lower lift) before authoring a new agentic suite.
   Capture CoT + token cost per run into the session log; cross-model report.
+  ✅ **Done** — host-agnostic `copilot/benchmark.py` (`Task`, `RunRecord`,
+  `BenchmarkRunner` driving the engine over a suite with N repeats, capturing
+  final code / answer / tools / turns / tokens; injected `env_factory`, async
+  `scorer`, and `log`). Studio wiring `studio_backend/bench/`: kernel-backed
+  scorers (compile + nonempty geometry; `inverse_design` vf/moduli rel-error;
+  `reconstruction` IoU — the last needs voxel export from the geometry runner,
+  currently degrades gracefully), a starter suite, and a CLI (`python -m
+  studio_backend.bench.run`) that resolves provider per model (inference, not
+  the global config default), records each run as a session for the Log
+  Explorer, and prints a per-(model,task) table. Verified end-to-end with the
+  real kernel (geometry + GPU sim + vf scoring). **Open:** determinism policy
+  (temp/seed not yet plumbed through `engine.run`; repeats handle variance);
+  `material_understanding` needs an LLM judge (free-text, not auto-graded);
+  reconstruction needs kernel voxel export.
 - **P6 — embedding boundary doc + example** (CAD-plugin-style host that supplies
   its own `ToolEnv`).
 - **P7 — extract `metagen-copilot` as its own package/repo** (likely shipped
