@@ -20,8 +20,6 @@ from __future__ import annotations
 import json
 from typing import AsyncIterator, Optional
 
-from openai import AsyncOpenAI
-
 from ..types import (
     AssistantMessage, Capabilities, Document, Done, Event, Image, Msg, Raw,
     SystemBlock, Text, Thinking, ThinkingDelta, TextDelta, ToolCall,
@@ -55,8 +53,17 @@ class OpenAIProvider:
         self.mode = mode
         self.profile = profile or {}
         self.name = "openai" if mode == "responses" else "openai-compat"
-        # vLLM commonly wants *some* key string even when auth is off.
-        self._client = AsyncOpenAI(api_key=api_key or "EMPTY", base_url=base_url)
+        self._api_key = api_key or "EMPTY"   # vLLM wants *some* key even w/o auth
+        self._base_url = base_url
+        self.__client = None
+
+    @property
+    def _client(self):
+        # lazy: the openai SDK is an optional extra, imported only on first use.
+        if self.__client is None:
+            from openai import AsyncOpenAI
+            self.__client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+        return self.__client
 
     # -- capabilities -------------------------------------------------------
     def capabilities(self, model: str) -> Capabilities:

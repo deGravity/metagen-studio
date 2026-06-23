@@ -23,8 +23,8 @@ from typing import Optional
 
 from .. import chat as _chat
 from .. import sessions as _sess
-from ..copilot import BenchmarkRunner, CopilotEngine, ToolEnv, aggregate
-from ..copilot.types import SystemBlock
+from metagen_copilot import BenchmarkRunner, CopilotEngine, ToolEnv, aggregate
+from metagen_copilot.types import SystemBlock
 from ..models import ChatRequest, ChatMessage, ChatStateContext
 from .scoring import make_scorer
 from .suite import load_suite

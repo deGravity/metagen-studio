@@ -5,6 +5,7 @@ frontend/tsconfig.tsbuildinfo
 backend/*.egg-info/
 backend/build/
 backend/dist/
+**/*.egg-info/
 backend/__pycache__/
 backend/studio_backend/_frontend_dist/
 **/__pycache__/

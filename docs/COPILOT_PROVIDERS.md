@@ -352,6 +352,17 @@ default leaves them unset so the live copilot behaves identically to now.
 - **P7 — extract `metagen-copilot` as its own package/repo** (likely shipped
   with the backend server). Mechanical once P1's boundary holds: bump `copilot/`
   to a package with its own `pyproject`, studio depends on it. See §9.
+  ✅ **Done (in-repo package).** `studio_backend/copilot/` → standalone
+  `metagen-copilot/` (import name `metagen_copilot`) with its own `pyproject`
+  and per-provider/pdf optional extras; installed editable; studio depends on
+  `metagen-copilot[anthropic,openai]` and delegates its `pdf`/`gemini` extras.
+  Anthropic + OpenAI SDK imports made lazy (Gemini already was), so the core +
+  all adapters import and construct with **zero** vendor SDKs — verified by
+  blocking the SDKs at import time. The 9 import sites (chat.py, bench/) updated;
+  no behavior change (SSE parity, the four provider mock round-trips, and the
+  real-kernel benchmark scorer all still pass). **Not done:** splitting into a
+  separate git repo/submodule — that needs a remote and is a `git subtree split`
+  away (the same path used to extract studio itself), to do when desired.
 
 Each phase ships independently; P1 leaves the studio unchanged.
 

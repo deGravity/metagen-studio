@@ -6,8 +6,6 @@ from __future__ import annotations
 import os
 from typing import AsyncIterator, Optional
 
-from anthropic import AsyncAnthropic
-
 from ..types import (
     AssistantMessage, Capabilities, Done, Event, Image, Document, Msg, Raw,
     SystemBlock, Text, Thinking, ThinkingDelta, TextDelta, ToolCall, ToolCallStarted,
@@ -59,6 +57,7 @@ class AnthropicProvider:
         if not self._api_key:
             yield Done(stop_reason="error")
             return
+        from anthropic import AsyncAnthropic   # lazy: SDK is an optional extra
         client = AsyncAnthropic(api_key=self._api_key)
 
         sys_blocks = []

@@ -13,21 +13,21 @@ dependencies = [
     "python-multipart>=0.0.9",
     "numpy>=1.24",
     "pydantic>=2.0",
-    "anthropic>=0.40",
-    "openai>=2.0",
+    # The copilot engine, providers, tools, and PDF pipeline now live in the
+    # standalone metagen-copilot package. The studio ships with the Anthropic +
+    # OpenAI (incl. vLLM-compatible) providers by default.
+    "metagen-copilot[anthropic,openai]>=0.1.0",
     "metagen-dsl>=0.1.0",
     "metagen-kernel>=0.1.0",
     "metagen-simulator>=0.1.0",
 ]
 
 [project.optional-dependencies]
-# PDF attachment preprocessing (copilot.pdf). pymupdf is the lightweight,
-# no-ML default backend; marker/docling/mineru are heavy/GPU and run as a
-# remote service (copilot.pdf.<backend>.endpoint), not installed here.
-pdf = ["pymupdf>=1.24"]
-# Google Gemini provider (copilot.provider: gemini). Lazily imported, so the
-# studio runs without it unless Gemini is selected.
-gemini = ["google-genai>=1.0"]
+# Optional copilot capabilities, delegated to the metagen-copilot extras:
+#   pdf    — PyMuPDF attachment preprocessing (copilot.pdf)
+#   gemini — Google Gemini provider (copilot.provider: gemini)
+pdf = ["metagen-copilot[pdf]>=0.1.0"]
+gemini = ["metagen-copilot[gemini]>=0.1.0"]
 
 [project.scripts]
 # `conda install metagen-studio && metagen-studio` launches the packaged

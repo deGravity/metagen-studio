@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metagen-copilot"
+version = "0.1.0"
+description = "Provider-neutral, UI-decoupled agent engine for metamaterial design copilots."
+requires-python = ">=3.10"
+# Core is intentionally dependency-free: the engine, tool registry, normalized
+# types, and benchmark runner import no vendor SDKs. Providers and PDF backends
+# are optional extras; each provider's SDK is lazily imported on first use, so
+# `import metagen_copilot` works with none of them installed.
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=2.0"]            # also covers OpenAI-compatible servers (vLLM)
+gemini = ["google-genai>=1.0"]
+pdf = ["pymupdf>=1.24"]
+all = ["anthropic>=0.40", "openai>=2.0", "google-genai>=1.0", "pymupdf>=1.24"]
+
+[tool.setuptools.packages.find]
+include = ["metagen_copilot*"]

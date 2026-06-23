@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from ..copilot import Task
+from metagen_copilot import Task
 
 STARTER: list[Task] = [
     Task(id="gyroid-basic",

@@ -33,14 +33,14 @@ from .models import ChatRequest, ChatStateContext
 from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
-from .copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
-from .copilot.providers import build_provider
-from .copilot.types import (
+from metagen_copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
+from metagen_copilot.providers import build_provider
+from metagen_copilot.types import (
     SystemBlock, Msg, Text, Document, ToolCall, ToolResult, Thinking, Raw, ToolDef,
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
     Artifact, Done, ErrorEvent,
 )
-from .copilot import pdf as _pdf
+from metagen_copilot import pdf as _pdf
 
 
 def _to_msg(m) -> Msg:
@@ -242,7 +242,7 @@ def _prepare_attachments(messages: list, provider, model: str) -> list:
 
 
 def _pdf_default_caps():
-    from .copilot.types import Capabilities
+    from metagen_copilot.types import Capabilities
     return Capabilities(native_pdf=False, native_images=False)
 
 
