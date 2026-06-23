@@ -69,6 +69,9 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState('Untitled session');
   const [sessionNameSource, setSessionNameSource] = useState('auto');
+  // bump to ask ChatPanel to rehydrate the transcript; node = which prefix
+  // (undefined = HEAD). Reset on session switch, set to the node on checkout.
+  const [chatRestore, setChatRestore] = useState<{ token: number; node?: string }>({ token: 0 });
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [thinking, setThinking] = useState(true);
   const [cleanupOpen, setCleanupOpen] = useState(false);
@@ -106,6 +109,8 @@ export default function App() {
     setSessionName(tree.name);
     setSessionNameSource(tree.name_source);
     localStorage.setItem(LS_SESSION, tree.session_id);
+    // rehydrate chat at HEAD for the adopted session (clears any stale node)
+    setChatRestore((s) => ({ token: s.token + 1, node: undefined }));
     listSessions().then(setSessions).catch(() => {});
   }
 
@@ -160,7 +165,11 @@ export default function App() {
       bc.onmessage = (e) => {
         const m: any = e.data;
         if (m?.type === 'checkout' && m.session_id === sessionId && m.node_id) {
-          getNode(sessionId, m.node_id).then(applyRestore).catch(() => {});
+          getNode(sessionId, m.node_id).then((r) => {
+            applyRestore(r);
+            // rehydrate chat to the rewound node's conversation prefix
+            setChatRestore((s) => ({ token: s.token + 1, node: m.node_id }));
+          }).catch(() => {});
         }
       };
     } catch { /* BroadcastChannel unsupported */ }
@@ -378,6 +387,8 @@ export default function App() {
               available={info?.chat_available ?? false}
               sessionId={sessionId ?? undefined}
               thinking={thinking}
+              restoreToken={chatRestore.token}
+              restoreNode={chatRestore.node}
               onApplyProposal={applyProposal}
               onGeometryDone={chatGeometryDone}
               onSimDone={chatSimDone}

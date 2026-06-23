@@ -252,6 +252,114 @@ def path_to_root(sid: str, node_id: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# chat transcript reconstruction (for rehydrating the chat UI on restore)
+# --------------------------------------------------------------------------- #
+def _parse_user_content(content) -> tuple[str, list]:
+    """A logged user_message content (str | list of wire blocks) → (text,
+    attachments) shaped for the frontend ChatTurn."""
+    if isinstance(content, str):
+        return content, []
+    text_parts: list[str] = []
+    atts: list[dict] = []
+    for b in (content or []):
+        if not isinstance(b, dict):
+            continue
+        bt = b.get('type')
+        if bt == 'text':
+            text_parts.append(b.get('text', ''))
+        elif bt == 'image':
+            src = b.get('source', {}) or {}
+            if src.get('type') == 'base64':
+                mt = src.get('media_type', 'image/png')
+                data = src.get('data', '')
+                atts.append({'id': _gen('att'), 'kind': 'image', 'mediaType': mt,
+                             'filename': 'image', 'size': 0, 'dataB64': data,
+                             'previewUrl': f'data:{mt};base64,{data}'})
+        elif bt == 'document':
+            src = b.get('source', {}) or {}
+            att = {'id': _gen('att'), 'kind': 'document',
+                   'mediaType': src.get('media_type', 'application/pdf'),
+                   'filename': b.get('title') or b.get('name') or 'document.pdf',
+                   'size': 0}
+            if src.get('type') == 'file':
+                att['fileId'] = src.get('file_id')
+            elif src.get('type') == 'base64':
+                att['dataB64'] = src.get('data', '')
+            atts.append(att)
+    return ' '.join(t for t in text_parts if t).strip(), atts
+
+
+def transcript(sid: str, node_id: Optional[str] = None) -> list[dict]:
+    """Rebuild the chat transcript (frontend ChatTurn[] shape) from the event
+    log, for the conversation prefix ending at `node_id` (default HEAD). Lets
+    the UI rehydrate chat history + attachments after a reload/checkout — the
+    backend is the source of truth; the live frontend only mirrors it."""
+    tree = get_tree(sid)
+    if tree is None:
+        return []
+    target = node_id or tree.get('head')
+    allowed: Optional[set] = None
+    if target and target in (tree.get('nodes') or {}):
+        ids: list = []
+        for nid in path_to_root(sid, target):
+            ids.extend(tree['nodes'].get(nid, {}).get('event_ids', []))
+        allowed = set(ids)
+
+    decisions: dict[str, str] = {}    # proposal summary → applied|discarded
+    turns: list[dict] = []
+    cur: Optional[dict] = None
+    for ev in read_events(sid):
+        if allowed is not None and ev.get('id') not in allowed:
+            continue
+        t = ev.get('type')
+        p = ev.get('payload') or {}
+        if t == 'proposal_decision':
+            decisions[p.get('summary', '')] = (
+                'applied' if p.get('status') in ('accepted', 'applied') else 'discarded')
+        elif t == 'user_message':
+            text, atts = _parse_user_content(p.get('content'))
+            turns.append({'id': ev['id'], 'role': 'user', 'text': text,
+                          'attachments': atts})
+            cur = {'id': _gen('turn'), 'role': 'assistant', 'blocks': [],
+                   'thinking': '', 'proposals': [], 'toolResults': [],
+                   'streaming': False}
+            turns.append(cur)
+        elif t == 'copilot_response' and cur is not None:
+            blocks: list[dict] = []
+            for b in p.get('content_blocks', []):
+                bt = b.get('type')
+                if bt == 'thinking':
+                    cur['thinking'] += b.get('thinking', '') or ''
+                elif bt == 'text':
+                    blocks.append({'type': 'text', 'text': b.get('text', '')})
+                elif bt == 'tool_use':
+                    blocks.append({'type': 'tool_use', 'id': b.get('id'),
+                                   'name': b.get('name'), 'input': b.get('input', {})})
+            if blocks:    # last response's display blocks win (matches live UI)
+                cur['blocks'] = blocks
+        elif t == 'proposal' and cur is not None:
+            cur['proposals'].append({'id': p.get('tool_id') or _gen('prop'),
+                                     'new_code': p.get('new_code', ''),
+                                     'summary': p.get('summary', ''),
+                                     'status': 'pending'})
+        elif t == 'tool_exec' and cur is not None:
+            cur['toolResults'].append({'tool_id': p.get('tool_id'),
+                                       'name': p.get('name'),
+                                       'result': p.get('result')})
+
+    for tn in turns:
+        for pr in tn.get('proposals', []):
+            if pr['summary'] in decisions:
+                pr['status'] = decisions[pr['summary']]
+    # drop a trailing assistant turn that captured nothing (interrupted/errored)
+    while turns and turns[-1]['role'] == 'assistant' and not turns[-1]['blocks'] \
+            and not turns[-1]['proposals'] and not turns[-1]['toolResults'] \
+            and not turns[-1]['thinking']:
+        turns.pop()
+    return turns
+
+
+# --------------------------------------------------------------------------- #
 # content-addressed blobs (dedup'd geometry/sim results incl. meshes)
 # --------------------------------------------------------------------------- #
 def put_blob(sid: str, payload: dict) -> str:

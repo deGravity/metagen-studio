@@ -92,6 +92,13 @@ export async function checkoutNode(id: string, nodeId: string): Promise<NodeRest
 export async function getNode(id: string, nodeId: string): Promise<NodeRestore> {
   return getJson(`/sessions/${id}/node/${nodeId}`);
 }
+// Rehydrate the chat transcript (+ attachments) from the event log, for the
+// conversation prefix ending at `node` (default HEAD). Shape matches the
+// ChatPanel's ChatTurn; returned loosely-typed and cast at the call site.
+export async function getTranscript(id: string, node?: string): Promise<any[]> {
+  const q = node ? `?node=${encodeURIComponent(node)}` : '';
+  return (await getJson<{ turns: any[] }>(`/sessions/${id}/transcript${q}`)).turns;
+}
 export async function logSessionEvent(
   id: string, type: string, payload: any,
   node?: { kind: string; label: string; snapshot: any },

@@ -313,6 +313,15 @@ def session_node(sid: str, node_id: str):
             'events': list(_sessions.read_events(sid, node_id=node_id))}
 
 
+@app.get('/api/sessions/{sid}/transcript')
+def session_transcript(sid: str, node: str = None):
+    """Rehydrate the chat transcript (+ attachments) from the event log for the
+    conversation prefix ending at `node` (default HEAD)."""
+    if _sessions.get_tree(sid) is None:
+        raise HTTPException(status_code=404, detail='no such session')
+    return {'turns': _sessions.transcript(sid, node_id=node)}
+
+
 @app.post('/api/sessions/{sid}/checkout')
 def session_checkout(sid: str, req: CheckoutRequest):
     node = _sessions.checkout(sid, req.node_id)

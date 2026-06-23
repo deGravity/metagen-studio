@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { streamChat, uploadChatFile } from '../api';
+import { streamChat, uploadChatFile, getTranscript } from '../api';
 import type {
   ChatMessage, ChatStateContext, AssistantBlock, PendingProposal,
   Attachment, UserContentBlock,
@@ -12,6 +12,10 @@ interface Props {
   available: boolean;
   sessionId?: string;
   thinking?: boolean;
+  // Bumped by the host to request a chat rehydrate (session switch / restore /
+  // checkout); restoreNode picks the conversation prefix (undefined = HEAD).
+  restoreToken?: number;
+  restoreNode?: string;
   onApplyProposal: (newCode: string, proposalId: string, summary: string) => void;
   onGeometryDone: (summary: any) => void;
   onSimDone: (summary: any) => void;
@@ -137,6 +141,22 @@ export function ChatPanel(props: Props) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [turns]);
+
+  // Rehydrate the transcript from the event log on session switch / restore /
+  // checkout. The backend is the source of truth; we mirror it here so a page
+  // reload or a rewind doesn't lose the conversation + attachments. Skipped
+  // while streaming so we never clobber an in-flight turn.
+  useEffect(() => {
+    const sid = props.sessionId;
+    if (!sid) { setTurns([]); return; }
+    if (busy) return;
+    let cancelled = false;
+    getTranscript(sid, props.restoreNode)
+      .then((t) => { if (!cancelled) setTurns(t as ChatTurn[]); })
+      .catch(() => { /* leave current turns on failure */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.sessionId, props.restoreToken]);
 
   function buildApiMessages(): ChatMessage[] {
     const out: ChatMessage[] = [];
