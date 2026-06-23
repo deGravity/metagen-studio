@@ -233,9 +233,13 @@ class OpenAIProvider:
                 args = {"__raw_arguments__": e["args"]}
             parts.append(ToolCall(id=e["id"] or f"call_{idx}", name=e["name"], input=args))
 
-        stop_reason = "tool_use" if (finish_reason == "tool_calls" or
-                                     any(isinstance(p, ToolCall) for p in parts)) \
-            else ("end_turn" if finish_reason in ("stop", None) else finish_reason)
+        # Base stop_reason on what we actually parsed, not just finish_reason:
+        # a server can report finish_reason=tool_calls yet stream an empty/
+        # unparseable call (seen occasionally on vLLM) — treat that as a normal
+        # turn end so the engine doesn't end on a phantom tool call.
+        has_calls = any(isinstance(p, ToolCall) for p in parts)
+        stop_reason = "tool_use" if has_calls else (
+            "end_turn" if finish_reason in ("stop", "tool_calls", None) else finish_reason)
         yield AssistantMessage(parts=parts, stop_reason=stop_reason,
                                usage=_chat_usage(usage_obj))
 
