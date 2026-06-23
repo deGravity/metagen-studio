@@ -132,7 +132,7 @@ def _resolve_provider(req: ChatRequest):
     key_env = pcfg.get('key_env') or (
         'METAGEN_ANTHROPIC_API_KEY' if name in ('anthropic', 'claude') else None)
     api_key = getattr(req, 'api_key', None) or (os.environ.get(key_env) if key_env else None)
-    base_url = getattr(req, 'base_url', None) or pcfg.get('base_url')
+    base_url = _normalize_base_url(getattr(req, 'base_url', None) or pcfg.get('base_url'))
     mode = pcfg.get('mode')
     profile = (pcfg.get('models') or {}).get(req.model, {}) or {}
 
@@ -195,9 +195,21 @@ def provider_status() -> list[dict]:
     return out
 
 
+def _normalize_base_url(url: Optional[str]) -> Optional[str]:
+    """Tolerate a base_url with no scheme (the common paste mistake): default
+    to http://. Leaves an explicit http(s):// untouched."""
+    if not url:
+        return url
+    u = url.strip()
+    if u and not u.startswith(('http://', 'https://')):
+        u = 'http://' + u
+    return u
+
+
 async def discover_models(base_url: str, api_key: Optional[str] = None) -> dict:
     """List the models an OpenAI-compatible server (vLLM) is currently serving,
     via {base_url}/v1/models. Returns {models:[ids]} or {models:[], error:...}."""
+    base_url = _normalize_base_url(base_url)
     if not base_url:
         return {'models': [], 'error': 'no base_url'}
     try:
@@ -205,8 +217,8 @@ async def discover_models(base_url: str, api_key: Optional[str] = None) -> dict:
         client = AsyncOpenAI(api_key=api_key or 'EMPTY', base_url=base_url)
         resp = await client.models.list()
         return {'models': sorted(m.id for m in resp.data)}
-    except Exception as exc:  # noqa: BLE001
-        return {'models': [], 'error': f'{type(exc).__name__}: {exc}'}
+    except Exception as exc:  # noqa: BLE001 — include the URL so a bad one is obvious
+        return {'models': [], 'error': f'{type(exc).__name__}: {exc} (url={base_url})'}
 
 
 # Process-local ingest cache: repeated turns in a chat (and benchmark reruns
