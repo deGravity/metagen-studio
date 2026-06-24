@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from metagen_copilot import RunRecord, Task
+from dsl_eval_core import RunRecord, Task
 from ..kernel_job import run_geometry_result, run_sim_result
 from ..state import program_cache
 

@@ -33,15 +33,15 @@ from .models import ChatRequest, ChatStateContext, ProviderModelsRequest
 from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
-from metagen_copilot import (CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry,
+from dsl_copilot_core import (CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry,
                              Domain, registry_from_domain)
-from metagen_copilot.providers import build_provider
-from metagen_copilot.types import (
+from dsl_copilot_core.providers import build_provider
+from dsl_copilot_core.types import (
     SystemBlock, Msg, Text, Document, ToolCall, ToolResult, Thinking, Raw, ToolDef,
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
     Artifact, Done, ErrorEvent,
 )
-from metagen_copilot import pdf as _pdf
+from dsl_copilot_core import pdf as _pdf
 
 
 def _to_msg(m) -> Msg:
@@ -327,7 +327,7 @@ def _prepare_attachments(messages: list, provider, model: str) -> list:
 
 
 def _pdf_default_caps():
-    from metagen_copilot.types import Capabilities
+    from dsl_copilot_core.types import Capabilities
     return Capabilities(native_pdf=False, native_images=False)
 
 

@@ -13,21 +13,24 @@ dependencies = [
     "python-multipart>=0.0.9",
     "numpy>=1.24",
     "pydantic>=2.0",
-    # The copilot engine, providers, tools, and PDF pipeline now live in the
-    # standalone metagen-copilot package. The studio ships with the Anthropic +
-    # OpenAI (incl. vLLM-compatible) providers by default.
-    "metagen-copilot[anthropic,openai]>=0.1.0",
+    # Generic copilot machinery now lives in standalone packages (see
+    # ../../docs/repository_architecture.md): dsl-copilot-core (engine +
+    # providers + PDF) and dsl-eval-core (headless eval harness). The studio
+    # ships Anthropic + OpenAI (incl. vLLM-compatible) providers by default,
+    # and the eval extra so its benchmark CLI works.
+    "dsl-copilot-core[anthropic,openai,eval]>=0.1.0",
+    "dsl-eval-core>=0.1.0",
     "metagen-dsl>=0.1.0",
     "metagen-kernel>=0.1.0",
     "metagen-simulator>=0.1.0",
 ]
 
 [project.optional-dependencies]
-# Optional copilot capabilities, delegated to the metagen-copilot extras:
+# Optional copilot capabilities, delegated to the dsl-copilot-core extras:
 #   pdf    — PyMuPDF attachment preprocessing (copilot.pdf)
 #   gemini — Google Gemini provider (copilot.provider: gemini)
-pdf = ["metagen-copilot[pdf]>=0.1.0"]
-gemini = ["metagen-copilot[gemini]>=0.1.0"]
+pdf = ["dsl-copilot-core[pdf]>=0.1.0"]
+gemini = ["dsl-copilot-core[gemini]>=0.1.0"]
 
 [project.scripts]
 # `conda install metagen-studio && metagen-studio` launches the packaged

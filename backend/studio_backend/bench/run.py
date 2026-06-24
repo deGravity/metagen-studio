@@ -23,8 +23,10 @@ from typing import Optional
 
 from .. import chat as _chat
 from .. import sessions as _sess
-from metagen_copilot import BenchmarkRunner, CopilotEngine, ToolEnv, aggregate
-from metagen_copilot.types import SystemBlock
+from dsl_eval_core import BenchmarkRunner, aggregate
+from dsl_copilot_core import CopilotEngine, ToolEnv
+from dsl_copilot_core.solver import CopilotSolver
+from dsl_copilot_core.types import SystemBlock
 from ..models import ChatRequest, ChatMessage, ChatStateContext
 from .scoring import make_scorer
 from .suite import load_suite
@@ -90,16 +92,17 @@ async def _amain(args) -> int:
             print(f"[skip] {model}: {perr}")
             continue
         engine = CopilotEngine(provider, registry, max_turns=args.max_turns)
+        solver = CopilotSolver(engine, system, model=model, effort=args.effort,
+                               max_tokens=args.max_tokens)
         runner = BenchmarkRunner(
-            engine, system,
+            solver,
             env_factory=lambda t: ToolEnv(data={"state": ChatStateContext(code=t.initial_code)}),
             scorer=scorer)
         for task in tasks:
             for r in range(max(1, args.repeats)):
                 log = log_factory(task, model, r) if log_factory else None
                 print(f"[run] {model} · {task.id} · rep{r} …", flush=True)
-                rec = await runner.run_task(task, model=model, effort=args.effort,
-                                            max_tokens=args.max_tokens, repeat=r, log=log)
+                rec = await runner.run_task(task, repeat=r, log=log)
                 if log is not None:
                     try:
                         _sess.add_node(log._sid, "assistant_turn",  # type: ignore[attr-defined]
