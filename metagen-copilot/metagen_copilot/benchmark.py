@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol, runtime_checkable
 
 from .engine import CopilotEngine, LogFn
 from .tools import ToolEnv
@@ -67,6 +67,17 @@ class RunRecord:
 
 EnvFactory = Callable[[Task], ToolEnv]
 Scorer = Callable[[Task, RunRecord], Awaitable[dict]]
+
+
+@runtime_checkable
+class Solver(Protocol):
+    """A thing under evaluation: given a task + env, produce a RunRecord. The
+    eval harness scores any Solver — our copilot (CopilotSolver, in the copilot
+    package) is one; a non-copilot baseline is another. Eval depends on this
+    protocol, never on the copilot. See ../../docs/repository_architecture.md §2."""
+
+    async def solve(self, task: Task, env: ToolEnv) -> RunRecord:
+        ...
 
 
 class BenchmarkRunner:

@@ -33,7 +33,8 @@ from .models import ChatRequest, ChatStateContext, ProviderModelsRequest
 from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
-from metagen_copilot import CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry
+from metagen_copilot import (CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry,
+                             Domain, registry_from_domain)
 from metagen_copilot.providers import build_provider
 from metagen_copilot.types import (
     SystemBlock, Msg, Text, Document, ToolCall, ToolResult, Thinking, Raw, ToolDef,
@@ -93,17 +94,29 @@ def _wrap_tool(handler):
     return h
 
 
-def _build_registry() -> ToolRegistry:
-    reg = ToolRegistry()
+def _metamaterials_tools() -> list[Tool]:
+    """Wrap the metamaterial tool schemas + handlers into engine Tools. (This
+    list, the scorers, and the prompt are what will become metagen-domain's
+    Domain in Phase 2 of the architecture plan; for now they live here.)"""
+    out: list[Tool] = []
     for t in TOOLS:
         h = _TOOL_DISPATCH.get(t['name'])
         if h is None:
             continue
-        reg.register(Tool(
+        out.append(Tool(
             defn=ToolDef(name=t['name'], description=t['description'],
                          schema=t['input_schema']),
             handler=_wrap_tool(h)))
-    return reg
+    return out
+
+
+def _metamaterials_domain() -> Domain:
+    return Domain(name='metamaterials', tools=_metamaterials_tools(),
+                  system_text=_static_system_text())
+
+
+def _build_registry() -> ToolRegistry:
+    return registry_from_domain(_metamaterials_domain())
 
 
 def _infer_provider(model: str) -> str:
