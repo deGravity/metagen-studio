@@ -19,7 +19,7 @@ import type {
 } from './types';
 import {
   Selection, loadCreds, loadCustomModels, loadSelection, saveSelection, credsToSend,
-  baseUrlFor,
+  baseUrlFor, isAvailable,
 } from './llm';
 import { discoverModels } from './api';
 
@@ -424,6 +424,13 @@ export default function App() {
     last_error: error,
   };
 
+  // Chat is enabled when the *selected* provider is usable — either the backend
+  // has its creds, or the browser supplied them (key, or base_url for vLLM).
+  // NOT the global info.chat_available, which only reflects the server-side
+  // Anthropic key and ignores per-session provider choice + client creds.
+  const selProvider = providers.find((p) => p.name === llmSel.provider);
+  const chatAvailable = selProvider ? isAvailable(selProvider, llmCreds) : false;
+
   return (
     <div className="app">
       <header>
@@ -473,7 +480,7 @@ export default function App() {
             </div>
             <ChatPanel
               state={chatState}
-              available={info?.chat_available ?? false}
+              available={chatAvailable}
               sessionId={sessionId ?? undefined}
               ensureSession={ensureSession}
               thinking={thinking}

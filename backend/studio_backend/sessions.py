@@ -182,6 +182,15 @@ def read_events(sid: str, node_id: Optional[str] = None,
     p = _sdir(sid) / 'events.jsonl'
     if not p.exists():
         return
+    # A node owns its events via node['event_ids'], NOT via a node_id stamped on
+    # each event: an assistant_turn node is created at the END of a turn, after
+    # its events are already logged, so the events carry no node_id. Resolve by
+    # event-id membership instead (file order == chronological == event_ids order).
+    want_ids: Optional[set] = None
+    if node_id is not None:
+        tree = get_tree(sid)
+        node = (tree or {}).get('nodes', {}).get(node_id)
+        want_ids = set(node.get('event_ids', [])) if node else set()
     with open(p) as f:
         for line in f:
             line = line.strip()
@@ -191,7 +200,7 @@ def read_events(sid: str, node_id: Optional[str] = None,
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if node_id is not None and ev.get('node_id') != node_id:
+            if want_ids is not None and ev.get('id') not in want_ids:
                 continue
             if types is not None and ev.get('type') not in types:
                 continue

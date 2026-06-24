@@ -407,7 +407,9 @@ export function ChatPanel(props: Props) {
     return (
       <div className="chat-disabled">
         <p><strong>Chat disabled.</strong></p>
-        <p>Set <code>METAGEN_ANTHROPIC_API_KEY</code> in the backend environment and restart.</p>
+        <p>Pick a provider in the selector above, then add its API key (or vLLM
+           base URL) in the advanced settings — or set the matching key in the
+           backend environment.</p>
       </div>
     );
   }
