@@ -44,7 +44,7 @@ from .models import (  # noqa: E402
     SimulateRequest, SimulateResponse, InfoResponse, CodeRequest,
 )
 from .state import program_cache as _program_cache  # noqa: E402
-from .execute import hash_code  # noqa: E402
+from metagen_domain.compile import hash_code  # noqa: E402
 from .chat import router as chat_router  # noqa: E402
 from .kernel_job import stream_geometry, JOBS  # noqa: E402
 from . import results_cache  # noqa: E402

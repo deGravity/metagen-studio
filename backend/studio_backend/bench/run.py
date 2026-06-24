@@ -24,12 +24,11 @@ from typing import Optional
 from .. import chat as _chat
 from .. import sessions as _sess
 from dsl_eval_core import BenchmarkRunner, aggregate
-from dsl_copilot_core import CopilotEngine, ToolEnv
+from dsl_copilot_core import CopilotEngine, ToolEnv, registry_from_domain
 from dsl_copilot_core.solver import CopilotSolver
 from dsl_copilot_core.types import SystemBlock
+from metagen_domain import build_domain, make_scorer, load_suite
 from ..models import ChatRequest, ChatMessage, ChatStateContext
-from .scoring import make_scorer
-from .suite import load_suite
 
 
 def _provider_for(model: str, default_provider: Optional[str],
@@ -80,9 +79,10 @@ async def _amain(args) -> int:
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     per_model = _parse_provider_for(args.provider_for)
     tasks = load_suite(args.suite)
-    system = [SystemBlock(_chat._static_system_text(), cache=True)]
+    domain = build_domain()
+    system = [SystemBlock(domain.system_text, cache=True)]
     scorer = make_scorer(resolution=args.resolution)
-    registry = _chat._build_registry()
+    registry = registry_from_domain(domain)
     log_factory = _session_log_factory(args.models) if args.record else None
 
     all_records = []

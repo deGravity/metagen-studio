@@ -22,20 +22,16 @@ import time
 import traceback
 from typing import Any, AsyncIterator, Optional
 
-import numpy as np
 from anthropic import AsyncAnthropic
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from metagen_dsl.docs import render_llm as _render_dsl_docs
-
 from .models import ChatRequest, ChatStateContext, ProviderModelsRequest
-from .state import program_cache
 from .config import cfg
 from . import sessions as _sess
-from dsl_copilot_core import (CopilotEngine, Tool, ToolEnv, ToolOutcome, ToolRegistry,
-                             Domain, registry_from_domain)
+from dsl_copilot_core import CopilotEngine, ToolEnv, ToolRegistry, Domain, registry_from_domain
 from dsl_copilot_core.providers import build_provider
+from metagen_domain import build_domain
 from dsl_copilot_core.types import (
     SystemBlock, Msg, Text, Document, ToolCall, ToolResult, Thinking, Raw, ToolDef,
     TextDelta, ThinkingDelta, ToolCallStarted, AssistantMessage, ToolResultEvent,
@@ -83,40 +79,20 @@ def _to_msg(m) -> Msg:
     return Msg(m.role, parts)
 
 
-def _wrap_tool(handler):
-    """Adapt an existing (args, state)->(result, ui) tool to the engine's
-    (args, ToolEnv)->ToolOutcome contract; non-empty ui becomes an Artifact."""
-    async def h(args, env):
-        result, ui = await handler(args, env.get('state'))
-        arts = [Artifact(kind=ui.get('kind', 'tool_ui'), data=ui)] if ui else []
-        err = isinstance(result, dict) and result.get('ok') is False
-        return ToolOutcome(result=result, artifacts=arts, error=err)
-    return h
+# The metamaterials Domain (tools + scorers + prompt) lives in metagen-domain.
+# Memoize it — building it renders the DSL API docs (~6k tokens).
+_DOMAIN: Optional[Domain] = None
 
 
-def _metamaterials_tools() -> list[Tool]:
-    """Wrap the metamaterial tool schemas + handlers into engine Tools. (This
-    list, the scorers, and the prompt are what will become metagen-domain's
-    Domain in Phase 2 of the architecture plan; for now they live here.)"""
-    out: list[Tool] = []
-    for t in TOOLS:
-        h = _TOOL_DISPATCH.get(t['name'])
-        if h is None:
-            continue
-        out.append(Tool(
-            defn=ToolDef(name=t['name'], description=t['description'],
-                         schema=t['input_schema']),
-            handler=_wrap_tool(h)))
-    return out
-
-
-def _metamaterials_domain() -> Domain:
-    return Domain(name='metamaterials', tools=_metamaterials_tools(),
-                  system_text=_static_system_text())
+def _domain() -> Domain:
+    global _DOMAIN
+    if _DOMAIN is None:
+        _DOMAIN = build_domain()
+    return _DOMAIN
 
 
 def _build_registry() -> ToolRegistry:
-    return registry_from_domain(_metamaterials_domain())
+    return registry_from_domain(_domain())
 
 
 def _infer_provider(model: str) -> str:
@@ -433,303 +409,6 @@ def _compact_ui_for_log(sid, ui: dict) -> dict:
 router = APIRouter()
 
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "propose_edit",
-        "description": (
-            "Propose a complete replacement of the current code. The edit "
-            "is shown to the user as a diff; they accept or reject it. "
-            "You will not see their decision within this turn — if they "
-            "accept, the next user message will reflect the new code. "
-            "Always use this tool to make code changes; do not include "
-            "code blocks in chat text. Pass the **full** new file."
-        ),
-        "input_schema": {
-            "type": "object",
-            "required": ["new_code", "summary"],
-            "properties": {
-                "new_code": {
-                    "type": "string",
-                    "description": "The complete new contents of the user's code.py.",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "One-sentence summary of the change.",
-                },
-            },
-        },
-    },
-    {
-        "name": "run_geometry",
-        "description": (
-            "Generate the voxelized geometry at the given resolution and TPMS "
-            "optimizer mode. Returns volume fraction, fill fraction, and mesh "
-            "vertex/triangle counts. By default runs the user's current editor "
-            "code (and updates their 3D viewer). Pass `code` to instead test a "
-            "candidate program privately, in the background, without touching "
-            "the editor or viewer — use this to try an idea before proposing it."
-        ),
-        "input_schema": {
-            "type": "object",
-            "required": ["resolution"],
-            "properties": {
-                "resolution": {
-                    "type": "integer", "minimum": 8, "maximum": 256,
-                    "description": "Voxelization resolution. Multigrid-valid "
-                                   "values for GPU sim are 17, 33, 49, 65, 97, 129.",
-                },
-                "tpms_optimizer_mode": {
-                    "type": "string",
-                    "enum": ["current", "global", "experimental"],
-                    "description": "TPMS surface solver. 'current' is fast (BOBYQA only); "
-                                   "'global' is deterministic but ~10x slower (adds ESCH "
-                                   "global pre-search). Default: current.",
-                },
-                "code": {
-                    "type": "string",
-                    "description": "Optional. A candidate make_structure() program to run "
-                                   "INSTEAD of the user's editor code. Use this to test an "
-                                   "idea in your own reasoning before proposing it via "
-                                   "propose_edit. Omit to run the user's current code.",
-                },
-            },
-        },
-    },
-    {
-        "name": "run_simulation",
-        "description": (
-            "Run periodic-homogenization on the geometry. Returns the 6x6 "
-            "stiffness matrix C, plus derived properties (E, K, G, ν, anisotropy "
-            "indices). Auto-runs geometry first. By default uses the user's "
-            "current editor code; pass `code` to test a candidate program "
-            "privately (in the background) without touching the editor/viewer."
-        ),
-        "input_schema": {
-            "type": "object",
-            "required": ["resolution"],
-            "properties": {
-                "resolution": {"type": "integer", "minimum": 8, "maximum": 256},
-                "backend": {
-                    "type": "string", "enum": ["auto", "gpu", "cpu"],
-                    "description": "Solver backend. 'auto' uses GPU when valid, "
-                                   "else CPU. Default: auto.",
-                },
-                "tpms_optimizer_mode": {
-                    "type": "string",
-                    "enum": ["current", "global", "experimental"],
-                },
-                "code": {
-                    "type": "string",
-                    "description": "Optional. A candidate make_structure() program to "
-                                   "simulate INSTEAD of the user's editor code, privately "
-                                   "in the background. Omit to use the user's current code.",
-                },
-                "E": {"type": "number", "description": "Young's modulus of solid material. Default 1.0."},
-                "nu": {"type": "number", "description": "Poisson's ratio. Default 0.45."},
-            },
-        },
-    },
-]
-
-
-# ------------------------------------------------------------------------
-# Tool implementations
-# ------------------------------------------------------------------------
-
-async def _tool_propose_edit(args: dict, _state: ChatStateContext) -> tuple[dict, dict]:
-    """Returns (tool_result_for_model, ui_event_for_frontend)."""
-    new_code = args.get('new_code', '')
-    summary = args.get('summary', '')
-    return (
-        {'ok': True, 'note': 'Edit proposed. The user will accept or reject; '
-                             'you will see their decision in the next turn.'},
-        {'kind': 'proposal', 'new_code': new_code, 'summary': summary},
-    )
-
-
-def _geometry_summary(geo, code_hash: str, resolution: int, mode: str) -> dict:
-    vox = np.asarray(geo.voxel_active_cells)
-    return {
-        'code_hash': code_hash,
-        'resolution': resolution,
-        'cell_resolution': int(geo.cell_resolution),
-        'tpms_optimizer_mode': mode,
-        'volume_fraction': float(geo.volume_fraction),
-        'fill_fraction': float(vox.mean()),
-        'n_active_voxels': int(vox.sum()),
-        'n_total_voxels': int(vox.size),
-    }
-
-
-async def _tool_run_geometry(args: dict, state: ChatStateContext) -> tuple[dict, dict]:
-    resolution = int(args.get('resolution', 33))
-    mode = args.get('tpms_optimizer_mode', 'current')
-    k = 1 if mode == 'current' else 8
-    code = args.get('code') or state.code
-    candidate = bool(args.get('code')) and args['code'] != state.code
-    compiled = program_cache.get_or_compile(code)
-    if compiled.error:
-        return ({'ok': False, 'error': compiled.error, 'ran': 'candidate' if candidate else 'editor'}, {})
-    # Run the kernel in a subprocess so the chat SSE stream (on the event
-    # loop) keeps flowing — an in-process solve holds the GIL and would drop
-    # the chat connection ("network error").
-    from .kernel_job import run_geometry_result
-    t0 = time.perf_counter()
-    try:
-        g = await run_geometry_result(code, resolution, k)
-    except Exception as e:  # noqa: BLE001
-        return ({'ok': False, 'error': str(e),
-                 'ran': 'candidate' if candidate else 'editor'}, {})
-    elapsed = time.perf_counter() - t0
-    summary = {
-        'code_hash': compiled.code_hash,
-        'resolution': resolution,
-        'cell_resolution': g['cell_resolution'],
-        'tpms_optimizer_mode': mode,
-        'volume_fraction': g['volume_fraction'],
-        'fill_fraction': (g['n_active_voxels'] / g['n_total_voxels']
-                          if g['n_total_voxels'] else 0.0),
-        'n_active_voxels': g['n_active_voxels'],
-        'n_total_voxels': g['n_total_voxels'],
-        'elapsed_s': elapsed,
-        'ran': 'candidate' if candidate else 'editor',
-    }
-    # Cache the full result (incl mesh) keyed by this code's hash, so that if
-    # the user accepts a proposal of this code we can reuse it immediately.
-    from . import results_cache
-    results_cache.put_geometry(compiled.code_hash, {
-        'code_hash': compiled.code_hash, 'resolution': resolution,
-        'tpms_optimizer_mode': mode,
-        'stats': {'cell_resolution': g['cell_resolution'],
-                  'volume_fraction': g['volume_fraction'],
-                  'n_vertices': g['n_vertices'], 'n_triangles': g['n_triangles'],
-                  'n_active_voxels': g['n_active_voxels'],
-                  'n_total_voxels': g['n_total_voxels']},
-        'vertices_b64': g['vertices_b64'], 'triangles_b64': g['triangles_b64'],
-        'elapsed_geometry_s': round(elapsed, 3), 'cached': True,
-    })
-    # Candidate (background) runs do NOT touch the user's viewer — return an
-    # empty ui event so nothing is rendered. Editor runs update the viewer,
-    # carrying the mesh so it refreshes without a second (blocking) refetch.
-    if candidate:
-        return ({'ok': True, **summary}, {})
-    ui = {'kind': 'geometry_done', **summary,
-          'n_vertices': g['n_vertices'], 'n_triangles': g['n_triangles'],
-          'vertices_b64': g['vertices_b64'], 'triangles_b64': g['triangles_b64']}
-    return ({'ok': True, **summary}, ui)
-
-
-async def _tool_run_simulation(args: dict, state: ChatStateContext) -> tuple[dict, dict]:
-    resolution = int(args.get('resolution', 33))
-    backend = args.get('backend', 'auto')
-    mode = args.get('tpms_optimizer_mode', 'current')
-    k = 1 if mode == 'current' else 8
-    E = float(args.get('E', 1.0))
-    nu = float(args.get('nu', 0.45))
-    code = args.get('code') or state.code
-    candidate = bool(args.get('code')) and args['code'] != state.code
-    compiled = program_cache.get_or_compile(code)
-    if compiled.error:
-        return ({'ok': False, 'error': compiled.error,
-                 'ran': 'candidate' if candidate else 'editor'}, {})
-    from .kernel_job import run_sim_result
-    t0 = time.perf_counter()
-    try:
-        s = await run_sim_result(code, resolution, k, backend, E, nu)
-    except Exception as e:  # noqa: BLE001
-        return ({'ok': False, 'error': str(e),
-                 'ran': 'candidate' if candidate else 'editor'}, {})
-    elapsed = time.perf_counter() - t0
-    summary = {
-        'code_hash': compiled.code_hash,
-        'resolution': resolution,
-        'tpms_optimizer_mode': mode,
-        'backend_used': s['solver_used'],
-        'C_matrix': s['C_matrix'],
-        'properties': s['properties'],
-        'elapsed_s': elapsed,
-        'ran': 'candidate' if candidate else 'editor',
-    }
-    from . import results_cache
-    results_cache.put_sim(compiled.code_hash, {
-        'code_hash': compiled.code_hash, 'resolution': resolution,
-        'tpms_optimizer_mode': mode, 'backend_used': s['solver_used'],
-        'C_matrix': s['C_matrix'], 'properties': s['properties'],
-        'elapsed_sim_s': round(elapsed, 3), 'cached': True,
-    })
-    # Background candidate sims don't overwrite the user's results panel.
-    if candidate:
-        return ({'ok': True, **summary}, {})
-    return ({'ok': True, **summary}, {'kind': 'sim_done', **summary})
-
-
-_TOOL_DISPATCH = {
-    'propose_edit': _tool_propose_edit,
-    'run_geometry': _tool_run_geometry,
-    'run_simulation': _tool_run_simulation,
-}
-
-
-# ------------------------------------------------------------------------
-# Prompt construction
-# ------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """\
-You are a copilot embedded in metaDSL Studio — a browser-based CAD tool
-where users author Python programs that generate metamaterial unit cells
-via the metaDSL (`from metagen import *`). The user has an editor, a 3D
-viewer, and a simulation results panel; you help them author and refine
-their `make_structure()` function.
-
-Be terse. When a user asks for a change, use the `propose_edit` tool —
-do not paste code into chat. When a user asks "what does this do" or
-"why is X happening", explain in 2–4 sentences.
-
-Use `run_geometry` and `run_simulation` when the user asks you to test
-something or when you need data to answer accurately. Don't run sims
-unprompted on every turn — they cost real GPU time.
-
-You can test your OWN ideas before proposing them: pass a candidate
-`make_structure()` program as the `code` argument to `run_geometry` /
-`run_simulation`. That runs your candidate privately, in the background,
-WITHOUT changing the user's editor or 3D viewer — so you can draft a
-variant, measure it (volume fraction, moduli), iterate, and only then
-`propose_edit` the version you're confident in. Omit `code` to run the
-user's current editor program (this DOES update their viewer). The tool
-result's `ran` field ("candidate" vs "editor") tells you which program was
-actually evaluated — check it so you never confuse a background test with
-the user's live code.
-
-Resolution guidance: 33 is a fast smoke (sub-second sim on GPU); 65 is
-a typical working res; 97 is high-fidelity but takes minutes for dense
-structures. Multigrid-valid (i.e. GPU-eligible) resolutions: 17, 33, 49,
-65, 97, 129.
-"""
-
-
-# Auto-generated DSL API reference, rendered from docstrings in metagen_dsl.
-# Cached at module level; ~6k tokens. Set METAGEN_DSL_DOCS_NO_CACHE=1 to
-# re-render on every request (useful when iterating on docstrings).
-_DSL_API_DOCS_CACHE: Optional[str] = None
-
-
-def _get_dsl_api_docs() -> str:
-    global _DSL_API_DOCS_CACHE
-    if os.environ.get('METAGEN_DSL_DOCS_NO_CACHE') == '1':
-        return _render_dsl_docs()
-    if _DSL_API_DOCS_CACHE is None:
-        _DSL_API_DOCS_CACHE = _render_dsl_docs()
-    return _DSL_API_DOCS_CACHE
-
-
-def _static_system_text() -> str:
-    return (
-        SYSTEM_PROMPT
-        + "\n--- metaDSL API reference ---\n"
-        + _get_dsl_api_docs()
-    )
-
-
 def _workspace_state_text(state: ChatStateContext) -> str:
     code_hash = _hash12(state.code)
     parts = ["--- workspace state ---",
@@ -770,6 +449,37 @@ def _hash12(s: str) -> str:
 
 def _sse(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+
+
+def _react_to_artifact(ev) -> None:
+    """Studio-side reaction to a domain geometry/sim artifact: populate the
+    reuse-on-accept results cache. Best-effort; the domain tool itself stays
+    pure. Geometry is cached only when a mesh was produced (a sim-only run with
+    no mesh has nothing for the viewer to reuse)."""
+    data = ev.data
+    try:
+        from . import results_cache
+        if ev.kind == 'geometry_done' and 'vertices_b64' in data:
+            results_cache.put_geometry(data.get('code_hash'), {
+                'code_hash': data.get('code_hash'), 'resolution': data.get('resolution'),
+                'tpms_optimizer_mode': data.get('tpms_optimizer_mode'),
+                'stats': {'cell_resolution': data.get('cell_resolution'),
+                          'volume_fraction': data.get('volume_fraction'),
+                          'n_vertices': data.get('n_vertices'),
+                          'n_triangles': data.get('n_triangles'),
+                          'n_active_voxels': data.get('n_active_voxels'),
+                          'n_total_voxels': data.get('n_total_voxels')},
+                'vertices_b64': data['vertices_b64'], 'triangles_b64': data['triangles_b64'],
+                'elapsed_geometry_s': data.get('elapsed_s'), 'cached': True})
+        elif ev.kind == 'sim_done':
+            results_cache.put_sim(data.get('code_hash'), {
+                'code_hash': data.get('code_hash'), 'resolution': data.get('resolution'),
+                'tpms_optimizer_mode': data.get('tpms_optimizer_mode'),
+                'backend_used': data.get('backend_used'),
+                'C_matrix': data.get('C_matrix'), 'properties': data.get('properties'),
+                'elapsed_sim_s': data.get('elapsed_s'), 'cached': True})
+    except Exception:  # noqa: BLE001 — caching is best-effort
+        pass
 
 
 async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
@@ -834,7 +544,7 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
         if last_user is not None:
             log('user_message', {'content': last_user.content})
 
-    system = [SystemBlock(_static_system_text(), cache=True),
+    system = [SystemBlock(_domain().system_text, cache=True),
               SystemBlock(_workspace_state_text(req.state), cache=False)]
     messages = [_to_msg(m) for m in req.messages]
     # Route inline PDF attachments to what this model can consume (no-op for
@@ -878,7 +588,14 @@ async def _agent_loop(req: ChatRequest) -> AsyncIterator[bytes]:
                         tool_args_by_id[p.id] = p.input
                 yield _sse('assistant_msg', {'content': display_blocks})
             elif isinstance(ev, Artifact):
+                # Studio reactions to the domain's artifact stream (the tools are
+                # pure and just report what they produced): cache the result for
+                # reuse-on-accept, and suppress the viewer/results update for
+                # candidate (background) runs.
+                _react_to_artifact(ev)
                 ui_by_id[ev.tool_call_id] = ev.data
+                if ev.data.get('candidate'):
+                    continue   # background run: model sees the result, UI doesn't
                 yield _sse('tool_ui', {'tool_id': ev.tool_call_id,
                                        'name': ev.tool_name, **ev.data})
             elif isinstance(ev, ToolResultEvent):
